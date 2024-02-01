@@ -1,0 +1,7 @@
+name: state-space-models
+channels:
+  - defaults
+  - conda-forge
+  - anaconda
+dependencies
+  - matplotlib=3.8.2
