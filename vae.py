@@ -170,7 +170,7 @@ plt.plot(running_loss)
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 # %% Sample
-mngr.restore(mngr.latest_step())
+restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
 def build_sample_fn(model, params):
     def sample_fn(z: jnp.array) -> jnp.array:
         return model.apply(params, z, method=model.decode)
@@ -178,7 +178,7 @@ def build_sample_fn(model, params):
     return sample_fn
 
 
-sample_fn = build_sample_fn(model, params)
+sample_fn = build_sample_fn(model, restored_params)
 
 num_samples = 100
 h = w = 10

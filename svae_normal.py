@@ -29,12 +29,10 @@ import torchvision.transforms as T
 from torchvision.datasets import MNIST
 from torch.utils.data import DataLoader
 
+from tqdm.auto import tqdm
+import orbax.checkpoint as ocp
 # %%
-checkpoint_path = Path("vae_checkpoints")
-checkpoint_path.mkdir(exist_ok=True)
-
-dataset_path = Path("minst_dataset")
-dataset_path.mkdir(exist_ok=True)
+model_name = "vae"
 
 key = random.PRNGKey(42)
 
@@ -44,6 +42,15 @@ epochs = 100
 
 kl_weight = 1
 latent_dims = 20
+
+checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
+checkpoint_path.mkdir(exist_ok=True, parents=True)
+
+dataset_path = Path("minst_dataset")
+dataset_path.mkdir(exist_ok=True)
+
+options = ocp.CheckpointManagerOptions(max_to_keep=3, save_interval_steps=2)
+mngr = ocp.CheckpointManager(checkpoint_path, options=options)
 # %%
 train_dataset = MNIST(dataset_path, train=True, transform=T.ToTensor(), download=True)
 train_loader = DataLoader(
@@ -91,9 +98,11 @@ class VAE(nn.Module):
         eps = random.normal(rng, mu.shape)
         # convert logvar back to sigma and sample from learned distribution
         return eps * jnp.exp(logvar * 0.5) + mu
-    
+
     def decode(self, z):
-       return self.decoder(z)
+        return self.decoder(z)
+
+
 # %%
 def create_train_step(key, model, optimiser):
     params = model.init(
@@ -123,39 +132,53 @@ def create_train_step(key, model, optimiser):
         return params, opt_state, loss, mse_loss, kl_loss
 
     return train_step, params, opt_state
-# %%
+
+
+# %% Initialize the Model
 key, model_key = jax.random.split(key)
 
 model = VAE(latent_dims=latent_dims)
 optimiser = optax.adamw(learning_rate=1e-4)
 
 train_step, params, opt_state = create_train_step(model_key, model, optimiser)
-# %%
+# %% Train
+
+running_loss = []
+
 freq = 500
-for epoch in range(100):
-  total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
-  for i, (batch, c) in enumerate(train_loader):
-    key, subkey = jax.random.split(key)
+pbar = tqdm(range(100))
+for epoch in pbar:
+    total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
+    for i, (batch, c) in enumerate(train_loader):
+        key, subkey = jax.random.split(key)
 
-    batch = batch.numpy().reshape(batch_size, 784)
-    params, opt_state, loss, mse_loss, kl_loss = train_step(params, opt_state, batch, subkey)
+        batch = batch.numpy().reshape(batch_size, 784)
+        params, opt_state, loss, mse_loss, kl_loss = train_step(
+            params, opt_state, batch, subkey
+        )
 
-    total_loss += loss
-    total_mse += mse_loss
-    total_kl += kl_loss
+        total_loss += loss
+        total_mse += mse_loss
+        total_kl += kl_loss
 
-    if i > 0 and not i % freq:
-      print(f"epoch {epoch} | step {i} | loss: {total_loss / freq} ~ mse: {total_mse / freq}. kl: {total_kl / freq}")
-      total_loss = 0.
-      total_mse, total_kl = 0.0, 0.0
-# %%
+        pbar.set_postfix_str(f"Loss: {total_loss/i:.2f}")
+    running_loss.append(total_loss/len(train_loader))
+    mngr.save(epoch, args=ocp.args.StandardSave(params))
+mngr.wait_until_finished()
+# %% Training Metrics
+plt.plot(running_loss)
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+# %% Sample
+restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
 def build_sample_fn(model, params):
+    def sample_fn(z: jnp.array) -> jnp.array:
+        return model.apply(params, z, method=model.decode)
 
-  def sample_fn(z: jnp.array) -> jnp.array:
-    return model.apply(params, z, method=model.decode)
-  return sample_fn
+    return sample_fn
 
-sample_fn = build_sample_fn(model, params) 
+
+sample_fn = build_sample_fn(model, restored_params)
 
 num_samples = 100
 h = w = 10
@@ -164,7 +187,9 @@ key, z_key = jax.random.split(key)
 z = jax.random.normal(z_key, (num_samples, latent_dims))
 sample = sample_fn(z)
 
-sample = einsum('ikjl', np.asarray(sample).reshape(h, w, 28, 28)).reshape(28*h, 28*w)
-plt.imshow(sample, cmap='gray')
+sample = einsum("ikjl", np.asarray(sample).reshape(h, w, 28, 28)).reshape(
+    28 * h, 28 * w
+)
+plt.imshow(sample, cmap="gray")
 plt.show()
 # %%
