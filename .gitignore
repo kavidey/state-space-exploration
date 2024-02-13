@@ -1,2 +1,2 @@
 minst_dataset/
-vae_checkpoints/
+*_checkpoints*/

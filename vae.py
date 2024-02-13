@@ -145,8 +145,7 @@ train_step, params, opt_state = create_train_step(model_key, model, optimiser)
 
 running_loss = []
 
-freq = 500
-pbar = tqdm(range(100))
+pbar = tqdm(range(epochs))
 for epoch in pbar:
     total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
     for i, (batch, c) in enumerate(train_loader):

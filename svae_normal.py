@@ -38,12 +38,12 @@ key = random.PRNGKey(42)
 
 batch_size = 64
 validation_split = 0.2
-epochs = 100
+epochs = 25
 
 kl_weight = 1
 latent_dims = 20
 
-checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
+checkpoint_path = (Path("svae_checkpoints.normal_prior") / model_name).absolute()
 checkpoint_path.mkdir(exist_ok=True, parents=True)
 
 dataset_path = Path("minst_dataset")
@@ -66,10 +66,10 @@ class Encoder(nn.Module):
     def __call__(self, x):
         x = nn.Dense(400, name="enc_fc1")(x)
         x = nn.relu(x)
-        mu = nn.Dense(latent_dims, name="enc_fc2_mu")(x)
+        xhat = nn.Dense(latent_dims, name="enc_fc2_xhat")(x)
         # learning logvar = log(sigma^2) ensures that sigma is positive and helps with learning small numbers
         logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
-        return mu, logvar
+        return xhat, logvar
 
 
 class Decoder(nn.Module):
@@ -90,14 +90,30 @@ class VAE(nn.Module):
 
     @nn.compact
     def __call__(self, x, z_rng):
-        mu, logvar = self.encoder(x)
-        z = self.reparameterize(mu, logvar, z_rng)
-        return self.decode(z), mu, logvar
+        xhat, logvar = self.encoder(x)
+        # Convert logvar back to sigma and sample from learned distribution
+        sigma_0 = jnp.exp(logvar * 0.5)
 
-    def reparameterize(self, mu, logvar, rng):
+        # Calculate the posterior using bayes rule
+        mu_star, sigma_star = self.posterior(xhat, sigma_0)
+
+        z = self.reparameterize(mu_star, sigma_star, z_rng)
+        return self.decode(z), mu_star, sigma_star
+    
+    def posterior(self, xhat, sigma_0):
+        mu_0 = xhat
+        
+        sigma_prior = 1
+        mu_prior = 0
+
+        sigma_star = 1/(1/sigma_0 + 1/sigma_prior)
+        mu_star = sigma_star * (mu_0 / sigma_0 + mu_prior/sigma_prior)
+
+        return mu_star, sigma_star
+
+    def reparameterize(self, mu, sigma, rng):
         eps = random.normal(rng, mu.shape)
-        # convert logvar back to sigma and sample from learned distribution
-        return eps * jnp.exp(logvar * 0.5) + mu
+        return eps * sigma + mu
 
     def decode(self, z):
         return self.decoder(z)
@@ -112,7 +128,8 @@ def create_train_step(key, model, optimiser):
 
     def loss_fn(params, x, key):
         reduce_dims = list(range(1, len(x.shape)))
-        recon, mean, logvar = model.apply(params, x, key)
+        recon, mean, sigma = model.apply(params, x, key)
+        logvar = 2 * jnp.log(sigma)
         mse_loss = optax.l2_loss(recon, x).sum(axis=reduce_dims).mean()
         kl_loss = jnp.mean(
             -0.5 * jnp.sum(1 + logvar - mean**2 - jnp.exp(logvar), axis=reduce_dims)
@@ -145,8 +162,7 @@ train_step, params, opt_state = create_train_step(model_key, model, optimiser)
 
 running_loss = []
 
-freq = 500
-pbar = tqdm(range(100))
+pbar = tqdm(range(epochs))
 for epoch in pbar:
     total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
     for i, (batch, c) in enumerate(train_loader):
