@@ -32,18 +32,18 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import orbax.checkpoint as ocp
 # %%
-model_name = "vae"
+model_name = "svae_vae.normal_prior.no_kl"
 
 key = random.PRNGKey(42)
 
 batch_size = 64
 validation_split = 0.2
-epochs = 25
+epochs = 50
 
-kl_weight = 1
-latent_dims = 20
+kl_weight = 10
+latent_dims = 2
 
-checkpoint_path = (Path("svae_checkpoints.normal_prior") / model_name).absolute()
+checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
 checkpoint_path.mkdir(exist_ok=True, parents=True)
 
 dataset_path = Path("minst_dataset")
@@ -104,7 +104,7 @@ class VAE(nn.Module):
         mu_0 = xhat
         
         sigma_prior = 1
-        mu_prior = 0
+        mu_prior = 1
 
         sigma_star = 1/(1/sigma_0 + 1/sigma_prior)
         mu_star = sigma_star * (mu_0 / sigma_0 + mu_prior/sigma_prior)
@@ -185,6 +185,7 @@ mngr.wait_until_finished()
 plt.plot(running_loss)
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
+plt.show()
 # %% Sample
 restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
 def build_sample_fn(model, params):
@@ -197,10 +198,16 @@ def build_sample_fn(model, params):
 sample_fn = build_sample_fn(model, restored_params)
 
 num_samples = 100
-h = w = 10
+h = w = 15
 
-key, z_key = jax.random.split(key)
-z = jax.random.normal(z_key, (num_samples, latent_dims))
+# key, z_key = jax.random.split(key)
+# z = jax.random.normal(z_key, (num_samples, latent_dims))
+latent_size = 2
+ypts = jnp.linspace(-latent_size, latent_size, h)
+xpts = jnp.linspace(-latent_size, latent_size, w)
+z_ = jnp.meshgrid(xpts, ypts)
+z = jnp.vstack((z_[0].flatten(), z_[1].flatten())).T
+
 sample = sample_fn(z)
 
 sample = einsum("ikjl", np.asarray(sample).reshape(h, w, 28, 28)).reshape(
