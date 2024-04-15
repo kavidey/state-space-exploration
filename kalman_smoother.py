@@ -21,25 +21,28 @@ def multiply(
 
     return tfd.MultivariateNormalFullCovariance(mu, sigma)
 
-
-def predict(z: tfd.MultivariateNormalFullCovariance, A, b):
+def predict(z, A, b):
     '''
-    Finds P(z_t+1 | z_t)
+    P(z_t+1 | x_t, ..., x_1) = P(z_t+1 | z_t)
     '''
-    # mu = Az + b (linear update step)
-    mu = A @ z.loc + b
-    sigma = z.covariance()
-    
+    mu = A @ z.mean() + b
+    Q = jnp.zeros((latent_dims, latent_dims))
+    sigma = A @ z.covariance() @ jnp.linalg.inv(A) + Q
     return tfd.MultivariateNormalFullCovariance(mu, sigma)
 
-def fake_problem(xhat, sigma):
+def update(z, x, A, b):
     '''
-    Evaluates P(xhat_t | z_t) to find a distribution over z
-    This is possible because xhat_i and z are both known (calculated using the encoder)
+    P(z_t+1 | x_t+1, ... , x_1) ~= P(x_t+1 | z_t+1) * P(z_t+1 | x_t, ... x_1)
     '''
+    pred = predict(z, A, b)
 
-    return tfd.MultivariateNormalFullCovariance(xhat, sigma)
+    R = jnp.zeros((latent_dims, latent_dims))
+    K = pred.covariance() @ jnp.linalg.inv(pred.covariance() + R)
+    
+    sigma = pred.covariance() - K @ pred.covariance()
+    mu = pred.mu() + K @ (x - pred.mu())
 
+    return tfd.MultivariateNormalFullCovariance(mu, sigma)
 # %%
 def encoder(x):
     '''
@@ -51,15 +54,3 @@ def encoder(x):
 # %%
 def kalman_filter(x, A, b):
     xhat = jax.lax.map(encoder, x)
-    z = [
-        predict(
-            tfd.MultivariateNormalFullCovariance(jnp.zeros((latent_dims,)), jnp.identity(latent_dims)),
-            A,
-            b,
-        )
-    ]
-    for i in range(1, len(x)):
-        z[i] = multiply(predict(z[i - 1]), z[i - 1])
-
-
-# def kalman_smoother(x, A, b):
