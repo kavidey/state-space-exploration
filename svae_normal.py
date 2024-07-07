@@ -120,11 +120,11 @@ class VAE(nn.Module):
 
 
 # %%
-def create_train_step(key, model, optimiser):
+def create_train_step(key, model, optimizer):
     params = model.init(
         key, jnp.zeros((batch_size, 784)), jax.random.PRNGKey(0)
     )  # dummy key just as example input
-    opt_state = optimiser.init(params)
+    opt_state = optimizer.init(params)
 
     def loss_fn(params, x, key):
         reduce_dims = list(range(1, len(x.shape)))
@@ -143,7 +143,7 @@ def create_train_step(key, model, optimiser):
         losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key)
         loss, (mse_loss, kl_loss) = losses
 
-        updates, opt_state = optimiser.update(grads, opt_state, params)
+        updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
 
         return params, opt_state, loss, mse_loss, kl_loss
@@ -155,9 +155,9 @@ def create_train_step(key, model, optimiser):
 key, model_key = jax.random.split(key)
 
 model = VAE(latent_dims=latent_dims)
-optimiser = optax.adamw(learning_rate=1e-4)
+optimizer = optax.adamw(learning_rate=1e-4)
 
-train_step, params, opt_state = create_train_step(model_key, model, optimiser)
+train_step, params, opt_state = create_train_step(model_key, model, optimizer)
 # %% Train
 
 running_loss = []

@@ -4,10 +4,12 @@ channels:
   - pytorch
 dependencies:
   - python=3.10
+  - pip
   - matplotlib=3.8
   - numpy
   - tqdm=4.66.1
   - pytorch=2.2 # pytorch cpu is okay because we're just using it for dataloading
   - torchvision=0.17
+  - tensorflow-probability=0.24.0
   - pip:
       - flax==0.8 

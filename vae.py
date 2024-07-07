@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader
 
 from tqdm.auto import tqdm
 import orbax.checkpoint as ocp
+
 # %%
 model_name = "vae"
 
@@ -50,6 +51,7 @@ dataset_path = Path("minst_dataset")
 dataset_path.mkdir(exist_ok=True)
 
 options = ocp.CheckpointManagerOptions(max_to_keep=3, save_interval_steps=2)
+# mngr = ocp.CheckpointManager(checkpoint_path, ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler()), options=options)
 mngr = ocp.CheckpointManager(checkpoint_path, options=options)
 # %%
 train_dataset = MNIST(dataset_path, train=True, transform=T.ToTensor(), download=True)
@@ -161,7 +163,7 @@ for epoch in pbar:
         total_kl += kl_loss
 
         pbar.set_postfix_str(f"Loss: {total_loss/i:.2f}")
-    running_loss.append(total_loss/len(train_loader))
+    running_loss.append(total_loss / len(train_loader))
     mngr.save(epoch, args=ocp.args.StandardSave(params))
 mngr.wait_until_finished()
 # %% Training Metrics
@@ -170,6 +172,8 @@ plt.xlabel("Epoch")
 plt.ylabel("Loss")
 # %% Sample
 restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
+
+
 def build_sample_fn(model, params):
     def sample_fn(z: jnp.array) -> jnp.array:
         return model.apply(params, z, method=model.decode)
