@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 import jax.random as random
 import numpy as np
-from tensorflow_probability.substrates.jax import distributions as tfd
 
 from flax import linen as nn
 
@@ -82,7 +81,36 @@ train_dataloader = torch.utils.data.DataLoader(train_dset, batch_size=batch_size
 test_dataloader = torch.utils.data.DataLoader(train_dset, batch_size=batch_size)
 
 process_batch = jnp.array
-setup_batch = next(iter(train_dataloader))
+setup_batch = process_batch(next(iter(train_dataloader)))
+
+
+# %%
+class MultivariateNormalFullCovariance:
+    def __init__(self, mean, covariance):
+        self.__mean = mean
+        self.__covariance = covariance
+
+    def mean(self):
+        return self.__mean
+
+    def covariance(self):
+        return self.__covariance
+
+    def sample(self, seed):
+        d = self.__mean.shape[-1]
+
+        # https://juanitorduz.github.io/multivariate_normal/
+        # Could also use https://jax.readthedocs.io/en/latest/_autosummary/jax.random.multivariate_normal.html
+        epsilon = 0.0001
+        K = self.__covariance + jnp.identity(d) * epsilon
+
+        L = jnp.linalg.cholesky(K)
+        u = random.normal(seed, (d,))
+
+        return self.__mean + jnp.dot(u, L)
+
+    def __repr__(self) -> str:
+        return f"MultivariateNormalFullCovariance(mu={self.__mean}, sigma={self.__covariance})"
 
 
 # %%
@@ -91,22 +119,22 @@ class Encoder(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        x = nn.Dense(400, name="enc_fc1")(x)
+        x = nn.Dense(6, name="enc_fc1")(x)
         x = nn.relu(x)
         xhat = nn.Dense(latent_dims, name="enc_fc2_xhat")(x)
         # learning logvar = log(sigma^2) ensures that sigma is positive and helps with learning small numbers
         logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
         sigma = jnp.exp(logvar * 0.5)
 
-        return tfd.MultivariateNormalFullCovariance(xhat, jnp.diag(sigma))
+        return MultivariateNormalFullCovariance(xhat, jnp.diag(sigma))
 
 
 class Decoder(nn.Module):
     @nn.compact
     def __call__(self, z):
-        z = nn.Dense(400, name="dec_fc1")(z)
+        z = nn.Dense(6, name="dec_fc1")(z)
         z = nn.relu(z)
-        z = nn.Dense(784, name="dec_fc2")(z)
+        z = nn.Dense(10, name="dec_fc2")(z)
         return z
 
 
@@ -126,29 +154,34 @@ class SVAE_LDS(nn.Module):
 
     @nn.compact
     def __call__(self, x, z_rng):
-        z_t_sub_1 = tfd.MultivariateNormalFullCovariance(
-            jnp.zeros((latent_dims,)), jnp.eye(latent_dims)
+        bs = x.shape[0]
+        z_t_sub_1 = MultivariateNormalFullCovariance(
+            jnp.zeros((bs, latent_dims)), jnp.stack([jnp.eye(latent_dims)] * bs)
         )
 
         x_recon = []
         q_dist = []
         p_dist = []
 
-        for x_t in x:
+        for t in range(x.shape[1]):
+            x_t = x[:, t]
             # Prediction
             z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b)
 
             # Update
             z_t_given_t = self.update(z_t_given_t_sub_1, x_t)
 
+            # Sample and decode
             z_rng, z_t_rng = random.split(z_rng)
-            x_hat = self.decoder(z_t_given_t.sample(1, seed=z_t_rng))
+            sample = z_t_given_t.sample(z_t_rng)
+            x_hat = self.decoder(sample)
 
             x_recon.append(x_hat)
             q_dist.append(z_t_given_t)
             p_dist.append(z_t_given_t_sub_1)
 
-        x_recon = jnp.vstack(x_recon)
+        x_recon = jnp.stack(x_recon)
+        x_recon = jnp.permute_dims(x_recon, (1, 0, 2))
 
         return x_recon, q_dist, p_dist
 
@@ -157,28 +190,28 @@ class SVAE_LDS(nn.Module):
         P(z_t+1 | x_t, ..., x_1) = P(z_t+1 | z_t)
         """
         # z_t|t-1 = A @ z_t-1|t-1 + b
-        mu = A @ z_t.mean() + b
+        mu = jnp.dot(z_t.mean(), A) + b
 
         Q = jnp.zeros((latent_dims, latent_dims))
 
         # P_t|t-1 = A @ P_t-1|t-1 @ A^T + Q
         sigma = A @ z_t.covariance() @ A.T + Q
 
-        return tfd.MultivariateNormalFullCovariance(mu, sigma)
+        return MultivariateNormalFullCovariance(mu, sigma)
 
     def update(
-        self, z_t_given_t_sub_1: tfd.MultivariateNormalFullCovariance, x_t: jnp.array
+        self, z_t_given_t_sub_1: MultivariateNormalFullCovariance, x_t: jnp.array
     ):
         """
         Kalman filter update step
         P(z_t+1 | x_t+1, ... , x_1) ~= P(x_t+1 | z_t+1) * P(z_t+1 | x_t, ... x_1)
 
         Args:
-            z_t_given_t_sub_1 (tfd.MultivariateNormalFullCovariance): z_t|t-1
-            x_t (tfd.MultivariateNormalFullCovariance): x_t
+            z_t_given_t_sub_1 (MultivariateNormalFullCovariance): z_t|t-1
+            x_t (MultivariateNormalFullCovariance): x_t
 
         Returns:
-            tfd.MultivariateNormalFullCovariance: z_t|t
+            MultivariateNormalFullCovariance: z_t|t
         """
 
         H = jnp.eye(latent_dims)
@@ -191,22 +224,24 @@ class SVAE_LDS(nn.Module):
         K_t = jnp.eye(latent_dims)
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
-        mu = z_t_given_t_sub_1.mean() + K_t @ (
-            x_t.mean() - H @ z_t_given_t_sub_1.mean()
+        mu = z_t_given_t_sub_1.mean() + jnp.dot(
+            x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H), K_t
         )
 
         # P_t|t = P_t|t-1 - K_t @ H @ P_t|t-1 = (I - K_t @ H) @ P_t|t-1
-        sigma = (jnp.eye(latent_dims) - K_t @ H) @ z_t_given_t_sub_1
+        sigma = (jnp.eye(latent_dims) - K_t @ H) @ z_t_given_t_sub_1.covariance()
 
-        return tfd.MultivariateNormalFullCovariance(mu, sigma)
+        return MultivariateNormalFullCovariance(mu, sigma)
+
 
 model = SVAE_LDS(latent_dims=latent_dims)
-model.init(key, setup_batch, random.PRNGKey)
+# params = model.init(key, setup_batch, random.PRNGKey(0))
 # %%
-process_batch = jnp.array
-setup_batch = next(iter(train_dataloader))
 
-def kl_divergence(q: tfd.MultivariateNormalFullCovariance, p: tfd.MultivariateNormalFullCovariance):
+
+def kl_divergence(
+    q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
+):
     mu_0 = q.mean()
     sigma_0 = q.covariance()
 
@@ -216,10 +251,20 @@ def kl_divergence(q: tfd.MultivariateNormalFullCovariance, p: tfd.MultivariateNo
     k = mu_0.shape[0]
 
     # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
-    return 0.5 * jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0) + (mu_1 - mu_0).T @ jnp.linalg.inv(sigma_1) @ (mu_1 - mu_0) - k + jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_1))
+    a = 0.5 * jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0, axis1=1, axis2=2)
+    b = jnp.einsum(
+        "bi,bi->b",
+        jnp.einsum("bi,bii->bi", mu_1 - mu_0, jnp.linalg.inv(sigma_1)),
+        mu_1 - mu_0,
+    )  # unsure about this math
+    c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
+    return a + b - k + c
 
-def create_train_step(key: jax.random.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation):
-    params = model.init(key, setup_batch, random.PRNGKey)
+
+def create_train_step(
+    key: jax.random.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
+):
+    params = model.init(key, setup_batch, random.PRNGKey(0))
     opt_state = optimizer.init(params)
 
     def loss_fn(params, x, key):
@@ -231,20 +276,24 @@ def create_train_step(key: jax.random.PRNGKey, model: nn.Module, optimizer: opta
         for q_z, p_z in zip(q_dist, p_dist):
             kl_loss += kl_divergence(q_z, p_z)
         
+        kl_loss = jnp.nansum(kl_loss)
+
         loss = mse_loss + kl_weight * kl_loss
         return loss, (mse_loss, kl_loss)
-    
+
     @jax.jit
     def train_step(params, opt_state, x, key):
         losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key)
-        
+
         loss, (mse_loss, kl_loss) = losses
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
 
         return params, opt_state, loss, mse_loss, kl_weight
-    
+
     return train_step, params, opt_state
+
+
 # %%
 key, model_key = jax.random.split(key)
 
@@ -258,10 +307,10 @@ running_loss = []
 pbar = tqdm(range(epochs))
 for epoch in pbar:
     total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
-    for i, (batch, c) in enumerate(train_dataloader):
+    for i, batch in enumerate(train_dataloader):
         key, subkey = jax.random.split(key)
 
-        batch = batch.numpy().reshape(batch_size, 784)
+        batch = process_batch(batch)
         params, opt_state, loss, mse_loss, kl_loss = train_step(
             params, opt_state, batch, subkey
         )
@@ -271,7 +320,7 @@ for epoch in pbar:
         total_kl += kl_loss
 
         pbar.set_postfix_str(f"Loss: {total_loss/i:.2f}")
-    running_loss.append(total_loss/len(train_dataloader))
+    running_loss.append(total_loss / len(train_dataloader))
     mngr.save(epoch, args=ocp.args.StandardSave(params))
 mngr.wait_until_finished()
 # %%
@@ -279,3 +328,5 @@ plt.plot(running_loss)
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.show()
+
+# %%

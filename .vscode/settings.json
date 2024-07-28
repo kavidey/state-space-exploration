@@ -4,6 +4,7 @@
         "dset",
         "mngr",
         "optax",
+        "orbax",
         "pbar",
         "randn",
         "SVAE",
