@@ -22,7 +22,7 @@ import orbax.checkpoint as ocp
 key = random.PRNGKey(42)
 
 epochs = 1000
-batch_size = 32
+batch_size = 2 #32
 
 latent_dims = 4
 kl_weight = 10
@@ -167,9 +167,11 @@ class SVAE_LDS(nn.Module):
             x_t = x[:, t]
             # Prediction
             z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b)
+            print("z_t_given_t_sub_1", z_t_given_t_sub_1)
 
             # Update
             z_t_given_t = self.update(z_t_given_t_sub_1, x_t)
+            print("z_t_given_t", z_t_given_t)
 
             # Sample and decode
             z_rng, z_t_rng = random.split(z_rng)
@@ -276,7 +278,7 @@ def create_train_step(
         for q_z, p_z in zip(q_dist, p_dist):
             kl_loss += kl_divergence(q_z, p_z)
         
-        kl_loss = jnp.nansum(kl_loss)
+        kl_loss = jnp.sum(kl_loss) / x.shape[0]
 
         loss = mse_loss + kl_weight * kl_loss
         return loss, (mse_loss, kl_loss)
@@ -303,6 +305,8 @@ optimizer = optax.adamw(learning_rate=1e-4)
 train_step, params, opt_state = create_train_step(model_key, model, optimizer)
 # %%
 running_loss = []
+running_mse = []
+running_kl = []
 
 pbar = tqdm(range(epochs))
 for epoch in pbar:
@@ -321,12 +325,34 @@ for epoch in pbar:
 
         pbar.set_postfix_str(f"Loss: {total_loss/i:.2f}")
     running_loss.append(total_loss / len(train_dataloader))
+    running_mse.append(total_mse / len(train_dataloader))
+    running_kl.append(total_kl / len(train_dataloader))
     mngr.save(epoch, args=ocp.args.StandardSave(params))
 mngr.wait_until_finished()
 # %%
-plt.plot(running_loss)
+plt.plot(running_loss, label='Total Loss')
+plt.plot(running_mse, label='MSE Loss')
+plt.plot(running_kl, label='KL Loss')
+
+plt.legend()
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.show()
 
+# %%
+params = model.init(key, setup_batch, random.PRNGKey(0))
+
+x=setup_batch
+
+recon, q_dist, p_dist = model.apply(params, x, random.PRNGKey(1))
+
+mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
+
+kl_loss = 0
+for q_z, p_z in zip(q_dist, p_dist):
+    kl_loss += kl_divergence(q_z, p_z)
+
+kl_loss = jnp.sum(kl_loss) / x.shape[0]
+
+loss = mse_loss + kl_weight * kl_loss
 # %%
