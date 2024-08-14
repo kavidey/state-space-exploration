@@ -8,6 +8,8 @@
         "pbar",
         "randn",
         "SVAE",
-        "xhat"
+        "xhat",
+        "xlabel",
+        "ylabel"
     ]
 }

@@ -22,7 +22,7 @@ import orbax.checkpoint as ocp
 key = random.PRNGKey(42)
 
 epochs = 1000
-batch_size = 2 #32
+batch_size = 32
 
 latent_dims = 4
 kl_weight = 10
@@ -74,6 +74,7 @@ for i in range(N):
 # %%
 test_dset = np.stack(inputs)
 plt.imshow(train_dset[0].T)
+plt.show()
 # %%
 torch.manual_seed(47)
 
@@ -151,6 +152,9 @@ class SVAE_LDS(nn.Module):
             "kl_A", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
         )
         self.b = self.param("kl_b", nn.initializers.zeros, (latent_dims,))
+        self.Q = self.param(
+            "kl_Q", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
+        )
 
     @nn.compact
     def __call__(self, x, z_rng):
@@ -165,13 +169,14 @@ class SVAE_LDS(nn.Module):
 
         for t in range(x.shape[1]):
             x_t = x[:, t]
+            
             # Prediction
-            z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b)
-            print("z_t_given_t_sub_1", z_t_given_t_sub_1)
+            z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b, self.Q)
+            # print("z_t_given_t_sub_1", z_t_given_t_sub_1)
 
             # Update
             z_t_given_t = self.update(z_t_given_t_sub_1, x_t)
-            print("z_t_given_t", z_t_given_t)
+            # print("z_t_given_t", z_t_given_t)
 
             # Sample and decode
             z_rng, z_t_rng = random.split(z_rng)
@@ -181,20 +186,18 @@ class SVAE_LDS(nn.Module):
             x_recon.append(x_hat)
             q_dist.append(z_t_given_t)
             p_dist.append(z_t_given_t_sub_1)
-
+        
         x_recon = jnp.stack(x_recon)
         x_recon = jnp.permute_dims(x_recon, (1, 0, 2))
 
         return x_recon, q_dist, p_dist
 
-    def predict(self, z_t, A, b):
+    def predict(self, z_t, A, b, Q):
         """
         P(z_t+1 | x_t, ..., x_1) = P(z_t+1 | z_t)
         """
         # z_t|t-1 = A @ z_t-1|t-1 + b
         mu = jnp.dot(z_t.mean(), A) + b
-
-        Q = jnp.zeros((latent_dims, latent_dims))
 
         # P_t|t-1 = A @ P_t-1|t-1 @ A^T + Q
         sigma = A @ z_t.covariance() @ A.T + Q
@@ -217,18 +220,17 @@ class SVAE_LDS(nn.Module):
         """
 
         H = jnp.eye(latent_dims)
-        # R = jnp.zeros((latent_dims, latent_dims))
+        R = jnp.eye(latent_dims)
 
         # K_t = P_t|t-1 @ H^T @ (H @ P_t|t-1 @ H^T + R) ^ -1
-        # K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + R)
-
-        # If we assume that H is the identity, the the above simplifies to the identity
-        K_t = jnp.eye(latent_dims)
+        K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + R)
+        # print("K_t", K_t.shape)
+        # print("(x_t - z_t)", (x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H)).shape)
+        # print(jnp.dot(x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H), K_t).shape)
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
-        mu = z_t_given_t_sub_1.mean() + jnp.dot(
-            x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H), K_t
-        )
+        # Extra expand_dims and squeeze are necessary to make the matmul dimensions work
+        mu = z_t_given_t_sub_1.mean() + jnp.squeeze(K_t @ jnp.expand_dims(x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H), -1))
 
         # P_t|t = P_t|t-1 - K_t @ H @ P_t|t-1 = (I - K_t @ H) @ P_t|t-1
         sigma = (jnp.eye(latent_dims) - K_t @ H) @ z_t_given_t_sub_1.covariance()
@@ -239,8 +241,6 @@ class SVAE_LDS(nn.Module):
 model = SVAE_LDS(latent_dims=latent_dims)
 # params = model.init(key, setup_batch, random.PRNGKey(0))
 # %%
-
-
 def kl_divergence(
     q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
 ):
@@ -253,14 +253,11 @@ def kl_divergence(
     k = mu_0.shape[0]
 
     # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
-    a = 0.5 * jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0, axis1=1, axis2=2)
-    b = jnp.einsum(
-        "bi,bi->b",
-        jnp.einsum("bi,bii->bi", mu_1 - mu_0, jnp.linalg.inv(sigma_1)),
-        mu_1 - mu_0,
-    )  # unsure about this math
+    a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0, axis1=1, axis2=2)
+    mean_diff = jnp.expand_dims(mu_1 - mu_0, -1)
+    b = (mean_diff.swapaxes(1, 2) @ jnp.linalg.inv(sigma_1) @ mean_diff).squeeze()
     c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
-    return a + b - k + c
+    return 0.5 * (a + b - k + c)
 
 
 def create_train_step(
@@ -347,12 +344,15 @@ x=setup_batch
 recon, q_dist, p_dist = model.apply(params, x, random.PRNGKey(1))
 
 mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
+print("mse_loss", mse_loss)
 
 kl_loss = 0
 for q_z, p_z in zip(q_dist, p_dist):
-    kl_loss += kl_divergence(q_z, p_z)
+    kld = kl_divergence(q_z, p_z)
+    kl_loss += kld
 
 kl_loss = jnp.sum(kl_loss) / x.shape[0]
+print("kl_loss", kl_loss)
 
 loss = mse_loss + kl_weight * kl_loss
 # %%
