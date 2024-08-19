@@ -17,6 +17,7 @@ from flax import linen as nn
 import optax
 import orbax.checkpoint as ocp
 
+# jax.config.update("jax_debug_nans", True)
 # %%
 
 key = random.PRNGKey(42)
@@ -102,7 +103,7 @@ class MultivariateNormalFullCovariance:
 
         # https://juanitorduz.github.io/multivariate_normal/
         # Could also use https://jax.readthedocs.io/en/latest/_autosummary/jax.random.multivariate_normal.html
-        epsilon = 0.0001
+        epsilon = 0.001
         K = self.__covariance + jnp.identity(d) * epsilon
 
         L = jnp.linalg.cholesky(K)
@@ -163,6 +164,8 @@ class SVAE_LDS(nn.Module):
             jnp.zeros((bs, latent_dims)), jnp.stack([jnp.eye(latent_dims)] * bs)
         )
 
+        Q = self.Q.T @ self.Q
+
         x_recon = []
         q_dist = []
         p_dist = []
@@ -171,12 +174,10 @@ class SVAE_LDS(nn.Module):
             x_t = x[:, t]
             
             # Prediction
-            z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b, self.Q)
-            # print("z_t_given_t_sub_1", z_t_given_t_sub_1)
+            z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b, Q)
 
             # Update
             z_t_given_t = self.update(z_t_given_t_sub_1, x_t)
-            # print("z_t_given_t", z_t_given_t)
 
             # Sample and decode
             z_rng, z_t_rng = random.split(z_rng)
@@ -224,9 +225,6 @@ class SVAE_LDS(nn.Module):
 
         # K_t = P_t|t-1 @ H^T @ (H @ P_t|t-1 @ H^T + R) ^ -1
         K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + R)
-        # print("K_t", K_t.shape)
-        # print("(x_t - z_t)", (x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H)).shape)
-        # print(jnp.dot(x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H), K_t).shape)
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
         # Extra expand_dims and squeeze are necessary to make the matmul dimensions work
@@ -280,7 +278,7 @@ def create_train_step(
         loss = mse_loss + kl_weight * kl_loss
         return loss, (mse_loss, kl_loss)
 
-    @jax.jit
+    # @jax.jit
     def train_step(params, opt_state, x, key):
         losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key)
 
