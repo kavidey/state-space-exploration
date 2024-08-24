@@ -88,7 +88,7 @@ setup_batch = process_batch(next(iter(train_dataloader)))
 
 # %%
 class MultivariateNormalFullCovariance:
-    def __init__(self, mean, covariance):
+    def __init__(self, mean: jnp.ndarray, covariance: jnp.ndarray):
         self.__mean = mean
         self.__covariance = covariance
 
@@ -98,6 +98,7 @@ class MultivariateNormalFullCovariance:
     def covariance(self):
         return self.__covariance
 
+    @jax.jit
     def sample(self, seed):
         d = self.__mean.shape[-1]
 
@@ -113,22 +114,47 @@ class MultivariateNormalFullCovariance:
 
     def __repr__(self) -> str:
         return f"MultivariateNormalFullCovariance(mu={self.__mean}, sigma={self.__covariance})"
+    
+    def _tree_flatten(self):
+        children = (self.__mean, self.__covariance)  # arrays / dynamic values
+        aux_data = {}  # static values
+        return (children, aux_data)
+    
+    @classmethod
+    def _tree_unflatten(cls, aux_data, children):
+        return cls(*children, **aux_data)
 
+jax.tree_util.register_pytree_node(MultivariateNormalFullCovariance,
+                               MultivariateNormalFullCovariance._tree_flatten,
+                               MultivariateNormalFullCovariance._tree_unflatten)
 
 # %%
+def diag_3d(x):
+    '''
+    Takes a 3d tensor and turns the last dimension the items on a diagonal matrix, like jnp.diag
+
+    Args:
+        x: jnp.array
+    
+    Returns:
+        jnp.array
+    '''
+    return jnp.einsum("ijk,kl->ijkl", x, jnp.eye(x.shape[-1]))
+
 class Encoder(nn.Module):
     latent_dims: int
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x: jnp.array):
         x = nn.Dense(6, name="enc_fc1")(x)
         x = nn.relu(x)
         xhat = nn.Dense(latent_dims, name="enc_fc2_xhat")(x)
+
         # learning logvar = log(sigma^2) ensures that sigma is positive and helps with learning small numbers
         logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
         sigma = jnp.exp(logvar * 0.5)
 
-        return MultivariateNormalFullCovariance(xhat, jnp.diag(sigma))
+        return MultivariateNormalFullCovariance(xhat, diag_3d(sigma))
 
 
 class Decoder(nn.Module):
@@ -157,39 +183,37 @@ class SVAE_LDS(nn.Module):
             "kl_Q", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
         )
 
-    @nn.compact
     def __call__(self, x, z_rng):
         bs = x.shape[0]
+
+        # swap batch to second dim so it is (seq_len, batch, data)
+        x = jnp.permute_dims(x, (1, 0, 2))
+        z = self.encoder(x)
+
         z_t_sub_1 = MultivariateNormalFullCovariance(
             jnp.zeros((bs, latent_dims)), jnp.stack([jnp.eye(latent_dims)] * bs)
         )
 
         Q = self.Q.T @ self.Q
 
-        x_recon = []
-        q_dist = []
-        p_dist = []
+        def kf_forward(carry, z_t):
+            z_rng, z_t_sub_1 = carry
 
-        for t in range(x.shape[1]):
-            x_t = x[:, t]
-            
             # Prediction
             z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b, Q)
 
             # Update
-            z_t_given_t = self.update(z_t_given_t_sub_1, x_t)
+            z_t_given_t = self.update(z_t_given_t_sub_1, z_t)
 
             # Sample and decode
             z_rng, z_t_rng = random.split(z_rng)
-            sample = z_t_given_t.sample(z_t_rng)
-            x_hat = self.decoder(sample)
+            z_hat = z_t_given_t.sample(z_t_rng)
 
-            x_recon.append(x_hat)
-            q_dist.append(z_t_given_t)
-            p_dist.append(z_t_given_t_sub_1)
+            return (z_rng, z_t_given_t), (z_hat, z_t_given_t, z_t_given_t_sub_1) # carry, (z_recon, q_dist, p_dist)
         
-        x_recon = jnp.stack(x_recon)
-        x_recon = jnp.permute_dims(x_recon, (1, 0, 2))
+        _, result = jax.lax.scan(kf_forward, (z_rng, z_t_sub_1), z)
+        z_recon, q_dist, p_dist = result
+        x_recon = self.decoder(jnp.permute_dims(z_recon, (1, 0, 2)))
 
         return x_recon, q_dist, p_dist
 
@@ -269,16 +293,17 @@ def create_train_step(
 
         mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
 
-        kl_loss = 0
-        for q_z, p_z in zip(q_dist, p_dist):
-            kl_loss += kl_divergence(q_z, p_z)
+        def kl_wrapper(_, dists):
+            q_z, p_z = dists
+            return None, kl_divergence(q_z, p_z)
+        _, kl_loss = jax.lax.scan(kl_wrapper, None, (q_dist, p_dist))
         
         kl_loss = jnp.sum(kl_loss) / x.shape[0]
 
         loss = mse_loss + kl_weight * kl_loss
         return loss, (mse_loss, kl_loss)
 
-    # @jax.jit
+    @jax.jit
     def train_step(params, opt_state, x, key):
         losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key)
 

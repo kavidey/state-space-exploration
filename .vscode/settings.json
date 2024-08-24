@@ -2,12 +2,16 @@
     "cSpell.words": [
         "adamw",
         "dset",
+        "fori",
         "mngr",
+        "nans",
+        "ndarray",
         "optax",
         "orbax",
         "pbar",
         "randn",
         "SVAE",
+        "unflatten",
         "xhat",
         "xlabel",
         "ylabel"
