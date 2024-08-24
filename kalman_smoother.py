@@ -26,7 +26,7 @@ epochs = 1000
 batch_size = 32
 
 latent_dims = 4
-kl_weight = 10
+kl_weight = 1
 model_name = f"svae_lds.klw_{kl_weight:.2f}"
 
 checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
@@ -298,7 +298,7 @@ def create_train_step(
             return None, kl_divergence(q_z, p_z)
         _, kl_loss = jax.lax.scan(kl_wrapper, None, (q_dist, p_dist))
         
-        kl_loss = jnp.sum(kl_loss) / x.shape[0]
+        kl_loss = jnp.sum(kl_loss) / x.shape[1]
 
         loss = mse_loss + kl_weight * kl_loss
         return loss, (mse_loss, kl_loss)
@@ -311,7 +311,7 @@ def create_train_step(
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
 
-        return params, opt_state, loss, mse_loss, kl_weight
+        return params, opt_state, loss, mse_loss, kl_loss
 
     return train_step, params, opt_state
 
@@ -358,7 +358,32 @@ plt.legend()
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.show()
+# %%
+def create_pred_step(model: nn.Module):
+    @jax.jit
+    def pred_step(params, x, key):
+        recon, q_dist, p_dist = model.apply(params, x, key)
+        return recon, q_dist, p_dist
+    
+    return pred_step
 
+sample_batch = process_batch(next(iter(test_dataloader)))
+pred_step = create_pred_step(model)
+recon, q_dist, p_dist = pred_step(params, sample_batch, key)
+# %%
+f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
+i = 6
+
+ax[0].imshow(sample_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[0].set_title('Sequence')
+
+ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[1].set_title('Reconstruction')
+
+ax[2].plot(q_dist.mean()[:,i])
+ax[2].set_title('Each Dimension of the Latent Variable')
+
+plt.show()
 # %%
 params = model.init(key, setup_batch, random.PRNGKey(0))
 
@@ -369,13 +394,14 @@ recon, q_dist, p_dist = model.apply(params, x, random.PRNGKey(1))
 mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
 print("mse_loss", mse_loss)
 
-kl_loss = 0
-for q_z, p_z in zip(q_dist, p_dist):
-    kld = kl_divergence(q_z, p_z)
-    kl_loss += kld
+def kl_wrapper(_, dists):
+    q_z, p_z = dists
+    return None, kl_divergence(q_z, p_z)
+_, kl_loss = jax.lax.scan(kl_wrapper, None, (q_dist, p_dist))
 
-kl_loss = jnp.sum(kl_loss) / x.shape[0]
+kl_loss = jnp.sum(kl_loss) / x.shape[1]
 print("kl_loss", kl_loss)
 
 loss = mse_loss + kl_weight * kl_loss
+print("loss", loss)
 # %%
