@@ -12,6 +12,8 @@
         "randn",
         "SVAE",
         "unflatten",
+        "vmax",
+        "vmin",
         "xhat",
         "xlabel",
         "ylabel"

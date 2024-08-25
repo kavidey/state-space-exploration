@@ -22,7 +22,7 @@ import orbax.checkpoint as ocp
 
 key = random.PRNGKey(42)
 
-epochs = 1000
+epochs = 5000
 batch_size = 32
 
 latent_dims = 4
@@ -104,7 +104,7 @@ class MultivariateNormalFullCovariance:
 
         # https://juanitorduz.github.io/multivariate_normal/
         # Could also use https://jax.readthedocs.io/en/latest/_autosummary/jax.random.multivariate_normal.html
-        epsilon = 0.001
+        epsilon = 0.0001
         K = self.__covariance + jnp.identity(d) * epsilon
 
         L = jnp.linalg.cholesky(K)
@@ -176,11 +176,11 @@ class SVAE_LDS(nn.Module):
 
         # Initialize Kalman Filter matrices
         self.A = self.param(
-            "kl_A", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
+            "kf_A", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
         )
-        self.b = self.param("kl_b", nn.initializers.zeros, (latent_dims,))
+        self.b = self.param("kf_b", nn.initializers.zeros, (latent_dims,))
         self.Q = self.param(
-            "kl_Q", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
+            "kf_Q", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
         )
 
     def __call__(self, x, z_rng):
@@ -245,10 +245,9 @@ class SVAE_LDS(nn.Module):
         """
 
         H = jnp.eye(latent_dims)
-        R = jnp.eye(latent_dims)
 
         # K_t = P_t|t-1 @ H^T @ (H @ P_t|t-1 @ H^T + R) ^ -1
-        K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + R)
+        K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + x_t.covariance())
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
         # Extra expand_dims and squeeze are necessary to make the matmul dimensions work
@@ -320,7 +319,8 @@ def create_train_step(
 key, model_key = jax.random.split(key)
 
 model = SVAE_LDS(latent_dims=latent_dims)
-optimizer = optax.adamw(learning_rate=1e-4)
+optimizer = optax.adam(learning_rate=1e-3)
+# optimizer = optax.sgd(learning_rate=1e-3)
 
 train_step, params, opt_state = create_train_step(model_key, model, optimizer)
 # %%
@@ -369,13 +369,35 @@ def create_pred_step(model: nn.Module):
 
 sample_batch = process_batch(next(iter(test_dataloader)))
 pred_step = create_pred_step(model)
-recon, q_dist, p_dist = pred_step(params, sample_batch, key)
 # %%
+recon, q_dist, p_dist = pred_step(params, sample_batch, key)
 f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
-i = 6
+i = 0
 
 ax[0].imshow(sample_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[0].set_title('Sequence')
+
+ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[1].set_title('Reconstruction')
+
+ax[2].plot(q_dist.mean()[:,i])
+ax[2].set_title('Each Dimension of the Latent Variable')
+
+plt.show()
+# %%
+print("learned parameters", params["params"].keys())
+print("A", params["params"]["kf_A"])
+print("b", params["params"]["kf_b"])
+print("Q", params["params"]["kf_Q"])
+# %%
+masked_batch = sample_batch.at[:,10:40].set(0)
+recon, q_dist, p_dist = pred_step(params, masked_batch, key)
+
+f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
+i = 20
+
+ax[0].imshow(masked_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[0].set_title('Masked Sequence')
 
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
