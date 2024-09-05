@@ -17,16 +17,23 @@ from flax import linen as nn
 import optax
 import orbax.checkpoint as ocp
 
+from tensorflow_probability.substrates import jax as tfp
+tfd = tfp.distributions
+tfb = tfp.bijectors
+# tfpk = tfp.math.psd_kernels
+
 # jax.config.update("jax_debug_nans", True)
 # %%
 
 key = random.PRNGKey(42)
 
-epochs = 5000
+epochs = 1000
 batch_size = 32
 
 latent_dims = 4
 kl_weight = 1
+A_init_epsilon = 0.01
+Q_init_std = 0.05
 model_name = f"svae_lds.klw_{kl_weight:.2f}"
 
 checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
@@ -85,7 +92,6 @@ test_dataloader = torch.utils.data.DataLoader(train_dset, batch_size=batch_size)
 process_batch = jnp.array
 setup_batch = process_batch(next(iter(train_dataloader)))
 
-
 # %%
 class MultivariateNormalFullCovariance:
     def __init__(self, mean: jnp.ndarray, covariance: jnp.ndarray):
@@ -141,6 +147,25 @@ def diag_3d(x):
     '''
     return jnp.einsum("ijk,kl->ijkl", x, jnp.eye(x.shape[-1]))
 
+def initializer_diag_with_noise(epsilon: float):
+    '''
+    Generates an initializer for the A matrix of a kalman filter.
+    The generated matrix is I + epsilon * normal
+
+    Args:
+        epsilon: noise factor
+    
+    Returns:
+        (random.PRNGKey, tuple) -> jnp.array
+    '''
+    def initializer(rng: random.PRNGKey, shape):
+        # make sure its square
+        assert shape[-1] == shape[-2]
+        x = jnp.eye(shape[-1])
+        return x + random.normal(rng, x.shape) * epsilon
+    
+    return initializer
+
 class Encoder(nn.Module):
     latent_dims: int
 
@@ -176,12 +201,18 @@ class SVAE_LDS(nn.Module):
 
         # Initialize Kalman Filter matrices
         self.A = self.param(
-            "kf_A", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
+            "kf_A", initializer_diag_with_noise(epsilon=A_init_epsilon), (latent_dims, latent_dims)
         )
         self.b = self.param("kf_b", nn.initializers.zeros, (latent_dims,))
-        self.Q = self.param(
-            "kf_Q", nn.initializers.xavier_uniform(), (latent_dims, latent_dims)
+        self.Q_param = self.param(
+            "kf_Q", nn.initializers.normal(Q_init_std), (int(latent_dims*(latent_dims+1)/2),)
         )
+
+        # Converts a vector to a covariance matrix using inverse cholesky decomposition
+        self.vec_to_cov_cholesky = tfb.Chain([
+            tfb.CholeskyOuterProduct(),
+            tfb.FillScaleTriL(diag_bijector=tfb.Exp(), diag_shift=None)
+        ])
 
     def __call__(self, x, z_rng):
         bs = x.shape[0]
@@ -194,13 +225,11 @@ class SVAE_LDS(nn.Module):
             jnp.zeros((bs, latent_dims)), jnp.stack([jnp.eye(latent_dims)] * bs)
         )
 
-        Q = self.Q.T @ self.Q
-
         def kf_forward(carry, z_t):
             z_rng, z_t_sub_1 = carry
 
             # Prediction
-            z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b, Q)
+            z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b, self.Q())
 
             # Update
             z_t_given_t = self.update(z_t_given_t_sub_1, z_t)
@@ -258,6 +287,15 @@ class SVAE_LDS(nn.Module):
 
         return MultivariateNormalFullCovariance(mu, sigma)
 
+    def Q(self):
+        return self.vec_to_cov_cholesky.forward(self.Q_param)
+    
+    @staticmethod
+    def vec_to_cov_cholesky(x):
+        return tfb.Chain([
+            tfb.CholeskyOuterProduct(),
+            tfb.FillScaleTriL(diag_bijector=tfb.Exp(), diag_shift=None)
+        ])(x)
 
 model = SVAE_LDS(latent_dims=latent_dims)
 # params = model.init(key, setup_batch, random.PRNGKey(0))
@@ -323,6 +361,11 @@ optimizer = optax.adam(learning_rate=1e-3)
 # optimizer = optax.sgd(learning_rate=1e-3)
 
 train_step, params, opt_state = create_train_step(model_key, model, optimizer)
+# %% Initial KF parameters
+print("learned parameters", params["params"].keys())
+print("A", params["params"]["kf_A"])
+print("b", params["params"]["kf_b"])
+print("Q", model.vec_to_cov_cholesky(params["params"]["kf_Q"]))
 # %%
 running_loss = []
 running_mse = []
@@ -359,18 +402,20 @@ plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.show()
 # %%
-def create_pred_step(model: nn.Module):
+restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
+
+def create_pred_step(model: nn.Module, params):
     @jax.jit
-    def pred_step(params, x, key):
+    def pred_step(x, key):
         recon, q_dist, p_dist = model.apply(params, x, key)
         return recon, q_dist, p_dist
     
     return pred_step
 
 sample_batch = process_batch(next(iter(test_dataloader)))
-pred_step = create_pred_step(model)
+pred_step = create_pred_step(model, restored_params)
 # %%
-recon, q_dist, p_dist = pred_step(params, sample_batch, key)
+recon, q_dist, p_dist = pred_step(sample_batch, key)
 f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
 i = 0
 
@@ -385,13 +430,13 @@ ax[2].set_title('Each Dimension of the Latent Variable')
 
 plt.show()
 # %%
-print("learned parameters", params["params"].keys())
-print("A", params["params"]["kf_A"])
-print("b", params["params"]["kf_b"])
-print("Q", params["params"]["kf_Q"])
+print("learned parameters", restored_params["params"].keys())
+print("A", restored_params["params"]["kf_A"])
+print("b", restored_params["params"]["kf_b"])
+print("Q", model.vec_to_cov_cholesky(restored_params["params"]["kf_Q"]))
 # %%
 masked_batch = sample_batch.at[:,10:40].set(0)
-recon, q_dist, p_dist = pred_step(params, masked_batch, key)
+recon, q_dist, p_dist = pred_step(masked_batch, key)
 
 f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
 i = 20
