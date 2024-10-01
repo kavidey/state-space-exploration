@@ -31,10 +31,10 @@ epochs = 1000
 batch_size = 32
 
 latent_dims = 4
-kl_weight = 1
+kl_weight = 0.3
 A_init_epsilon = 0.01
-Q_init_std = 0.05
-model_name = f"svae_lds.klw_{kl_weight:.2f}"
+Q_init_stdev = 0.05
+model_name = f"svae_lds.klw_{kl_weight:.2f}.ep_{epochs}"
 
 checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
 checkpoint_path.mkdir(exist_ok=True, parents=True)
@@ -166,6 +166,11 @@ def initializer_diag_with_noise(epsilon: float):
     
     return initializer
 
+# Converts a vector to a covariance matrix using inverse cholesky decomposition
+vec_to_cov_cholesky = tfb.Chain([
+    tfb.CholeskyOuterProduct(),
+    tfb.FillScaleTriL(diag_bijector=tfb.Exp(), diag_shift=None)
+])
 class Encoder(nn.Module):
     latent_dims: int
 
@@ -201,18 +206,12 @@ class SVAE_LDS(nn.Module):
 
         # Initialize Kalman Filter matrices
         self.A = self.param(
-            "kf_A", initializer_diag_with_noise(epsilon=A_init_epsilon), (latent_dims, latent_dims)
+            "kf_A", initializer_diag_with_noise(epsilon=0.01), (latent_dims, latent_dims)
         )
         self.b = self.param("kf_b", nn.initializers.zeros, (latent_dims,))
         self.Q_param = self.param(
-            "kf_Q", nn.initializers.normal(Q_init_std), (int(latent_dims*(latent_dims+1)/2),)
+            "kf_Q", nn.initializers.normal(Q_init_stdev), (int(latent_dims*(latent_dims+1)/2),)
         )
-
-        # Converts a vector to a covariance matrix using inverse cholesky decomposition
-        self.vec_to_cov_cholesky = tfb.Chain([
-            tfb.CholeskyOuterProduct(),
-            tfb.FillScaleTriL(diag_bijector=tfb.Exp(), diag_shift=None)
-        ])
 
     def __call__(self, x, z_rng):
         bs = x.shape[0]
@@ -288,15 +287,8 @@ class SVAE_LDS(nn.Module):
         return MultivariateNormalFullCovariance(mu, sigma)
 
     def Q(self):
-        return self.vec_to_cov_cholesky.forward(self.Q_param)
+        return vec_to_cov_cholesky.forward(self.Q_param)
     
-    @staticmethod
-    def vec_to_cov_cholesky(x):
-        return tfb.Chain([
-            tfb.CholeskyOuterProduct(),
-            tfb.FillScaleTriL(diag_bijector=tfb.Exp(), diag_shift=None)
-        ])(x)
-
 model = SVAE_LDS(latent_dims=latent_dims)
 # params = model.init(key, setup_batch, random.PRNGKey(0))
 # %%
@@ -309,7 +301,8 @@ def kl_divergence(
     mu_1 = p.mean()
     sigma_1 = p.covariance()
 
-    k = mu_0.shape[0]
+    k = mu_0.shape[-1]
+    print(k)
 
     # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
     a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0, axis1=1, axis2=2)
@@ -361,11 +354,11 @@ optimizer = optax.adam(learning_rate=1e-3)
 # optimizer = optax.sgd(learning_rate=1e-3)
 
 train_step, params, opt_state = create_train_step(model_key, model, optimizer)
-# %% Initial KF parameters
+# %%
 print("learned parameters", params["params"].keys())
 print("A", params["params"]["kf_A"])
 print("b", params["params"]["kf_b"])
-print("Q", model.vec_to_cov_cholesky(params["params"]["kf_Q"]))
+print("Q", vec_to_cov_cholesky.forward(params["params"]["kf_Q"]))
 # %%
 running_loss = []
 running_mse = []
@@ -433,7 +426,7 @@ plt.show()
 print("learned parameters", restored_params["params"].keys())
 print("A", restored_params["params"]["kf_A"])
 print("b", restored_params["params"]["kf_b"])
-print("Q", model.vec_to_cov_cholesky(restored_params["params"]["kf_Q"]))
+print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %%
 masked_batch = sample_batch.at[:,10:40].set(0)
 recon, q_dist, p_dist = pred_step(masked_batch, key)
@@ -456,7 +449,7 @@ params = model.init(key, setup_batch, random.PRNGKey(0))
 
 x=setup_batch
 
-recon, q_dist, p_dist = model.apply(params, x, random.PRNGKey(1))
+recon, q_dist, p_dist = model.apply(restored_params, x, random.PRNGKey(1))
 
 mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
 print("mse_loss", mse_loss)
