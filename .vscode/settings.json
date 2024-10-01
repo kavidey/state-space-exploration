@@ -12,6 +12,7 @@
         "orbax",
         "pbar",
         "randn",
+        "reparameterize",
         "SVAE",
         "unflatten",
         "vmax",

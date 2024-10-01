@@ -1,0 +1,113 @@
+%\documentclass[11pt]{hmcpset}
+\documentclass[12pt]{article}
+\usepackage[margin=1in,top=1in]{geometry}
+\usepackage{graphicx}  % Required for inserting images
+\usepackage{tcolorbox}  % Required for problem statement boxes
+\usepackage[calc,sets,vectors,phys,misc,LinAlg,prob,mats]{shortmath}
+%\usepackage[symbol]{footmisc}
+\usepackage[utf8]{inputenc}
+\usepackage{multicol}
+\usepackage{hyperref}
+\usepackage{mathtools}
+
+
+\usepackage{tikz}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{
+    \node[shape=circle,draw,inner sep=0.8pt] (char) {#1};}}
+
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\newcommand{\ang}{\mathring{\mathrm{A}}}
+
+\newtcolorbox[]{problem}[1][]{title=#1}
+\newenvironment{solution}[1][]{\def\ending{#1}}{\hfill{\ending}\bigskip}
+\newenvironment{solution*}{}{}
+
+\usepackage{enumitem}
+\setlist[enumerate,1]{label=(\alph*)}
+
+\title{SVAE LDS KL Divergence}
+\author{Kavi Dey}
+
+\begin{document}
+
+\maketitle
+
+\section{Starting Loss Function}
+Start with the KL Divergence between two sequences of length $T$ (predicted and updated):
+\begin{align}
+    KL(q||p) &= \E_{q(z|x)} \left[\log \frac{q(z|x)}{p(z)} \right] \\
+    &= \E_{q(z|x)} \left[ \log q(z|x) - log p(z) \right] \\
+    &= \E_{q(z|x)} \left[ \log q(z_1|x) + \sum_{i=2}^T \log q(z_i | z_{i-1}, x) - \log p(z_1) - \sum_{i=2}^T \log p(z_i|z_{i-1})\right]
+\end{align}
+The terms outside of the summation can be separated and form their own KL divergence:
+\begin{align}
+    &= \underbrace{KL(q(z_1|x)||p(z_1))}_\text{Term A} + \sum_{i=2}^{T} \E_{q(z_i,z_{i-1}|x)} \left[ \underbrace{\log q(z_i | z_{i-1}, x)}_{\text{Term B}} - \underbrace{\log p(z_i| z_{i-1})}_\text{Term C} \right]
+\end{align}
+The KL divergence in term A can be calculated in closed form, terms B and C are calculated below. Term C is simpler than term B so we will calculate it first.
+
+\section{Kalman Filter Equations} \label{sec:kalman_filter}
+Prediction Step Equations:
+\begin{align}
+    z_{i|i-1} &= \mA z_{i-1|i-1} + \vb \\
+    P_{i|i-1} &= \mA P_{i-1|i-1} + \mA^T + Q \\
+\end{align}
+Update Step Equations
+\begin{align}
+    K_i  &= P_{i|i-1}H^T(HP_{i|i-1}H^T + R)^{-1} \qquad \text{(Kalman Gain)} \\
+    z_{i|i} &= z_{i|i-1} + K_i (x_i - Hz_{i|i-1})  \\
+    P_{i|i} &= P_{i|i-1} - K_i H P_{i|i-1} = (I-K_iH) P_{i|i-1}
+\end{align}
+
+\section{Calculating Term C}
+Lets start with term C from section 1. From the kalman filter update step $\mu_i = \mA z_{i-1|i-1} + \vb$ and $P_i = \mA P_{i-1} \mA^T + Q$. Additionally we use the shorthand $\E_q = \E_{q(z_i, z_{i-1} | x)}$.
+\begin{align}
+    \hspace*{-2cm} \E_q \left[ \log p(z_i|z_{i-1})\right] &= -\frac{1}{2} \E_q \left[ k \log (2\pi) + \log \det P_i \right] - \frac{1}{2} \E_q \left[ (z_{i|i-1} - \mu_i)^T P_i (z_{i|i-1} - \mu_i) \right] \\
+    &= -\frac{1}{2} \left[ k \log (2\pi) + \log \det P_i \right] - \frac{1}{2} \E_q \left[ (z_{i|i-1} - \mu_i)^T P_i (z_{i|i-1} - \mu_i) \right] \\
+    &= -\frac{1}{2} \left[ k \log (2\pi) + \log \det P_i \right] \nonumber \\
+    & \quad - \frac{1}{2} \E_q \left[ \underbrace{z_{i|i-1}^T P_i^{-1} z_{i|i-1}}_{\circled{1}} - \underbrace{z_{i|i-1}^T P_i^{-1}\mA z_{i-1|i-1}}_{\circled{2}} - \underbrace{z_{i|i-1}^T P_i^{-1}\vb}_{\circled{3}} - \underbrace{\mA^Tz_{i-1|i-1}^T P_i^{-1} z_{i|i-1}}_{\circled{4}}  \right. \nonumber \\
+    & \quad \left. + \underbrace{\mA^Tz_{i-1|i-1}^T P_i^{-1}\mA z_{i-1|i-1}}_{\circled{5}} + \underbrace{\mA^Tz_{i-1|i-1}^T P_{i}^{-1}\vb}_{\circled{6}} - \underbrace{\vb^T P_{i}^{-1} z_{i|i-1}}_{\circled{7}} + \underbrace{\vb^T P_{i}^{-1} \mA z_{i-1|i-1}}_{\circled{8}} + \underbrace{\vb^T P_{i}^{-1} \vb}_{\circled{9}} \right]
+\end{align}
+Term $\circled{9}$ is constant and can be pulled out of the expectation, all other terms can be calculated with expectation identities from section \ref{sec:expectation_identities}.
+
+\section{Calculating Term B}
+The process for calculating term B starts the same way as term A. $q(z_i|z_{i-1})$ represents the update step of the kalman filter, so the equations for $\mu_i$ and $\Sigma_i$ are more complicated.
+\begin{align}
+    \E_q \left[ \log p(z_i|z_{i-1})\right] &= -\frac{1}{2} \E_q \left[ k \log (2\pi) + \log \det P_i \right] - \frac{1}{2} \E_q \left[ (z_i - \mu_i)^T P_i (z_i - \mu_i) \right] \label{eqn:b_unexpanded}
+\end{align}
+Using traditional kalman filter from section \ref{sec:kalman_filter} we get:
+\begin{align}
+    \mu_i & = \mA z_{i-1|i-1} + \vb + K_i (x_i - H(\mA z_{i-1|i-1} + \vb)) \\
+    P_{i|i} &= P_{i|i-1} - K_i H P_{i|i-1} = (I-K_iH) P_{i|i-1}
+\end{align}
+$P_{i|i}$ is constant with respect to $z$, so we don't need to expand the full equation.
+It will be helpful to simplify the equation for $\mu_i$ as follows:
+\begin{align}
+    \mu_i & = \mA z_{i-1|i-1} + \vb + K_i (x_i - H(\mA z_{i-1|i-1} + \vb)) \\
+    &= \mA z_{i-1|i-1} + \vb + K_i x_i - K_i H \mA z_{i-1|i-1} - K_i H \vb \\ 
+    &= \mA z_{i-1|i-1} - K_i H \mA z_{i-1|i-1} + \underbrace{\vb - K_i H \vb + K_i x_i}_\text{constant}
+\end{align}
+Now we can expand equation \ref{eqn:b_unexpanded} into:
+\begin{align}
+    \E_q \left[ \log p(z_i|z_{i-1})\right] &= -\frac{1}{2} \left[ k \log (2\pi) + \log \det P_i \right] \\
+    &\quad - \frac{1}{2} \E_q \left[ (z_i - \mu_i)^T P_i (z_i - \mu_i) \right]
+\end{align}
+
+\appendix
+\section{Expectation Identities} \label{sec:expectation_identities}
+\begin{align}
+    \E_{z \sim \mathcal{N}(\mu, \Sigma)} [z] &= \mu \\
+    \E_{z \sim \mathcal{N}(\mu, \Sigma)} [zz^T] &= \mu\mu^T + \Sigma \\
+    % second moment of multivariate normal is mu mu^T + sigma (Pattern Recognition and Machine Learning, 83)
+    % \E_{{z \sim \mathcal{N}(\mu, \Sigma)}} [z^T\mA z] &= \tr [A(\mu\mu^T + \Sigma)]  \\
+    \E_{y \sim \mathcal{N}(\mu_y, \Sigma_y), z \sim \mathcal{N}(\mu_z, \Sigma_z)} [zy^T] &= \mu_z \mu_y^T % + \Sigma_{zy}
+    % \E_{y \sim \mathcal{N}(\mu_y, \Sigma_y), z \sim \mathcal{N}(\mu_z, \Sigma_z)} [y^T\mA z] &= \tr [A\mu\mu^T]  \\
+\end{align}
+\section{Matrix Identities} \label{sec:matrix_identities}
+The following matrix identities are copied from Max Welling's wonderful notes on Kalman Filters (\href{http://www.stat.columbia.edu/~liam/teaching/neurostat-spr12/papers/hmm/KF-welling-notes.pdf}{stat.columbia.edu/~liam/teaching/neurostat-spr12/papers/hmm/KF-welling-notes.pdf})
+\begin{align}
+    \va^T \mA \vb &= \tr [\mA \vb \va^T] \\
+    \tr [\mA \mB] &= \tr [\mB \mA] \\
+    \log \det [\mA] &= - \log \det [\mA^{-1}]
+\end{align}
+
+\end{document}
