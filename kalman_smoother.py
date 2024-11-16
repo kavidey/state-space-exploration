@@ -415,16 +415,6 @@ for epoch in pbar:
             params, opt_state, batch, subkey
         )
 
-        contains_nan = False
-        for a in jax.tree.flatten(params1)[0]:
-            if jnp.isnan(jnp.sum(a)):
-                contains_nan=True
-        
-        if not contains_nan:
-            params = params1
-        else:
-            awegawg
-
         total_loss += loss
         total_mse += mse_loss
         total_kl += kl_loss
