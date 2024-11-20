@@ -32,9 +32,10 @@ epochs = 5000
 batch_size = 32
 
 latent_dims = 4
-kl_weight = 1
+kl_weight = 0.1
+kl_ramp = 1000 # The epoch where the KL weight reaches its final value
 A_init_epsilon = 0.01
-Q_init_stdev = 0.05
+Q_init_stdev = 0.02
 model_name = f"svae_lds.klw_{kl_weight:.2f}.ep_{epochs}"
 
 checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
@@ -341,7 +342,7 @@ def create_train_step(
     params = model.init(key, setup_batch, random.PRNGKey(0))
     opt_state = optimizer.init(params)
 
-    def loss_fn(params, x, key):
+    def loss_fn(params, x, key, kl_weight):
         recon, q_dist, p_dist = model.apply(params, x, key)
 
         mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
@@ -376,8 +377,8 @@ def create_train_step(
         return loss, (mse_loss, kl_loss)
 
     @jax.jit
-    def train_step(params, opt_state, x, key):
-        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key)
+    def train_step(params, opt_state, x, key, kl_weight):
+        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key, kl_weight)
 
         loss, (mse_loss, kl_loss) = losses
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -413,7 +414,7 @@ for epoch in pbar:
 
         batch = process_batch(batch)
         params, opt_state, loss, mse_loss, kl_loss = train_step(
-            params, opt_state, batch, subkey
+            params, opt_state, batch, subkey, min(epoch / kl_ramp, 1) * kl_weight
         )
 
         total_loss += loss
@@ -431,6 +432,7 @@ plt.plot(running_loss, label='Total Loss')
 plt.plot(running_mse, label='MSE Loss')
 plt.plot(running_kl, label='KL Loss')
 
+plt.ylim(-100, 200)
 plt.legend()
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
@@ -448,7 +450,7 @@ def create_pred_step(model: nn.Module, params):
 
 sample_batch = process_batch(next(iter(test_dataloader)))
 pred_step = create_pred_step(model, restored_params)
-# %%
+    # %%
 recon, q_dist, p_dist = pred_step(sample_batch, key)
 f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
 i = 0
