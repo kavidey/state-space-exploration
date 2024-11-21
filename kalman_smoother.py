@@ -32,7 +32,7 @@ epochs = 5000
 batch_size = 32
 
 latent_dims = 4
-kl_weight = 0.1
+kl_weight = 1
 kl_ramp = 1000 # The epoch where the KL weight reaches its final value
 A_init_epsilon = 0.01
 Q_init_stdev = 0.02
@@ -133,9 +133,6 @@ class MultivariateNormalFullCovariance:
         return cls(*children, **aux_data)
     
     def multiply(self, other: "MultivariateNormalFullCovariance") -> Tuple[float, "MultivariateNormalFullCovariance"]:
-        # c = (1/(jnp.sqrt(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))))) * \
-        #     jnp.exp(-(1/2)*jnp.squeeze(jnp.expand_dims(self.mean()-other.mean(), -2) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ jnp.expand_dims(self.mean()-other.mean(), -1)))
-        # c = jax.vmap(lambda m1, s1, m2, s2: -jnp.log(jnp.sqrt(jnp.linalg.det(2*jnp.pi*(s1+s2)))) + (- (1/2) * (m1-m2).T @ jnp.linalg.inv(s1+s2) @ (m1-m2)))(self.mean(), self.covariance(), other.mean(), other.covariance())
         c = (1/(jnp.sqrt(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))))) * \
             jnp.exp(-(1/2)*(self.mean()-other.mean()) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ (self.mean()-other.mean()))
 
@@ -143,8 +140,6 @@ class MultivariateNormalFullCovariance:
         o_cov_inv = jnp.linalg.inv(other.covariance())
 
         cov = jnp.linalg.inv(s_cov_inv+o_cov_inv)
-        # mean = jnp.squeeze(cov @ (s_cov_inv @ jnp.expand_dims(self.mean(),-1) + o_cov_inv @ jnp.expand_dims(other.mean(), -1)))
-        # mean = jax.vmap(lambda cov, sm, s_cov_inv, om, o_cov_inv: cov @ (s_cov_inv @ sm.T + o_cov_inv @ om.T))(cov, self.mean(), s_cov_inv, other.mean(), o_cov_inv)
         mean = cov @ (s_cov_inv @ self.mean().T + o_cov_inv @ other.mean().T)
         
         return c, MultivariateNormalFullCovariance(mean, cov)
@@ -154,18 +149,6 @@ jax.tree_util.register_pytree_node(MultivariateNormalFullCovariance,
                                MultivariateNormalFullCovariance._tree_unflatten)
 
 # %%
-def diag_3d(x):
-    '''
-    Takes a 3d tensor and turns the last dimension the items on a diagonal matrix, like jnp.diag
-
-    Args:
-        x: jnp.array
-    
-    Returns:
-        jnp.array
-    '''
-    return jnp.einsum("ijk,kl->ijkl", x, jnp.eye(x.shape[-1]))
-
 def initializer_diag_with_noise(epsilon: float):
     '''
     Generates an initializer for the A matrix of a kalman filter.
@@ -203,7 +186,7 @@ class Encoder(nn.Module):
         logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
         sigma = jnp.exp(logvar * 0.5)
 
-        return MultivariateNormalFullCovariance(xhat, diag_3d(sigma))
+        return MultivariateNormalFullCovariance(xhat, jax.vmap(jnp.diag)(sigma))
 
 
 class Decoder(nn.Module):
@@ -233,17 +216,10 @@ class SVAE_LDS(nn.Module):
         )
 
     def __call__(self, x, z_rng):
-        bs = x.shape[0]
-
-        # swap batch to second dim so it is (seq_len, batch, data)
-        x = jnp.permute_dims(x, (1, 0, 2))
         z = self.encoder(x)
 
-        # jax.debug.print("x: {x}", x=x)
-        # jax.debug.print("z: {z}", z=z)
-
         z_t_sub_1 = MultivariateNormalFullCovariance(
-            jnp.zeros((bs, latent_dims)), jnp.stack([jnp.eye(latent_dims)] * bs)
+            jnp.zeros((latent_dims),), jnp.eye(latent_dims)
         )
 
         def kf_forward(carry, z_t):
@@ -266,7 +242,7 @@ class SVAE_LDS(nn.Module):
         
         _, result = jax.lax.scan(kf_forward, (z_rng, z_t_sub_1), z)
         z_recon, q_dist, p_dist = result
-        x_recon = self.decoder(jnp.permute_dims(z_recon, (1, 0, 2)))
+        x_recon = self.decoder(z_recon)
 
         return x_recon, q_dist, p_dist
 
@@ -304,7 +280,7 @@ class SVAE_LDS(nn.Module):
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
         # Extra expand_dims and squeeze are necessary to make the matmul dimensions work
-        mu = z_t_given_t_sub_1.mean() + jnp.squeeze(K_t @ jnp.expand_dims(x_t.mean() - jnp.dot(z_t_given_t_sub_1.mean(), H), -1))
+        mu = z_t_given_t_sub_1.mean() + K_t @ (x_t.mean() - H @ z_t_given_t_sub_1.mean())
 
         # P_t|t = P_t|t-1 - K_t @ H @ P_t|t-1 = (I - K_t @ H) @ P_t|t-1
         sigma = (jnp.eye(latent_dims) - K_t @ H) @ z_t_given_t_sub_1.covariance()
@@ -314,8 +290,11 @@ class SVAE_LDS(nn.Module):
     def Q(self):
         return vec_to_cov_cholesky.forward(self.Q_param)
     
-model = SVAE_LDS(latent_dims=latent_dims)
-# params = model.init(key, setup_batch, random.PRNGKey(0))
+Batched_SVAE_LDS = nn.vmap(SVAE_LDS, 
+    in_axes=0, out_axes=0,
+    variable_axes={'params': None},
+    split_rngs={'params': False}
+)
 # %%
 def kl_divergence(
     q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
@@ -339,41 +318,57 @@ def kl_divergence(
 def create_train_step(
     key: jax.random.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch, random.PRNGKey(0))
+    params = model.init(key, setup_batch, random.split(random.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
     def loss_fn(params, x, key, kl_weight):
-        recon, q_dist, p_dist = model.apply(params, x, key)
-
-        mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
-
-        def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
-            q_z, p_z = dists
-
-            # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
-            p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
-
-            # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-            log_one_over_p_x = p_zi_given_x1toisub1[0] + q_z.multiply(p_zi_given_x1toisub1[1])[0]
-            # jax.debug.print("one_over_p_x: {log_one_over_p_x}", log_one_over_p_x=log_one_over_p_x)
-
-            k = q_z.mean().shape[-1]
-            # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
-            kl = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z.covariance()))) - log_one_over_p_x
-
-            return q_z, kl
-        
         bs = x.shape[0]
-        _, kl_loss = jax.lax.scan(jax.vmap(kl_wrapper),
-                                    MultivariateNormalFullCovariance(
-                                      jnp.zeros((bs, latent_dims)),
-                                      jnp.stack([jnp.eye(latent_dims)] * bs)
-                                    ),
-                                    (q_dist, p_dist))
-        
-        kl_loss = jnp.sum(kl_loss) / (x.shape[0]*x.shape[1])
 
-        loss = mse_loss + kl_weight * kl_loss
+        recon, q_dist, p_dist = model.apply(params, x, random.split(key, x.shape[0]))
+
+        def unbatched_loss(x, recon, q_dist, p_dist):
+            mse_loss = optax.l2_loss(recon, x).sum()
+        
+            # The first term has a different equation the next ones because p(z_1) is known in closed form
+            # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
+            p_z1 = MultivariateNormalFullCovariance(jnp.zeros((latent_dims)), jnp.eye(latent_dims))
+            q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
+            k = q_z1.mean().shape[-1]
+            kl_loss_0 = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z1.covariance()))) - jnp.log(q_z1.multiply(p_z1)[0])
+
+            # Calculate the rest of the terms
+            def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
+                q_z, p_z = dists
+
+                # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
+                p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
+
+                # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+                log_one_over_p_x = jnp.log(p_zi_given_x1toisub1[0]) + jnp.log(q_z.multiply(p_zi_given_x1toisub1[1])[0])
+                # jax.debug.print("one_over_p_x: {log_one_over_p_x}", log_one_over_p_x=log_one_over_p_x)
+
+                k = q_z.mean().shape[-1]
+                # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
+                kl = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z.covariance()))) - log_one_over_p_x
+
+                return q_z, kl
+
+            _, kl_loss_after0 = jax.lax.scan(kl_wrapper,
+                q_z1,
+                (
+                    MultivariateNormalFullCovariance(q_dist.mean()[1:], q_dist.covariance()[1:]),
+                    MultivariateNormalFullCovariance(p_dist.mean()[1:], p_dist.covariance()[1:])
+                )
+            )
+            kl_loss = jnp.append(jnp.array(kl_loss_0), kl_loss_after0)
+
+            return mse_loss, kl_loss
+        
+        losses = jax.vmap(unbatched_loss)(x, recon, q_dist, p_dist)
+        mse_loss = jnp.sum(losses[0]) / bs
+        kl_loss = jnp.sum(losses[1]) / (bs * x.shape[1])
+
+        loss = mse_loss + kl_loss * kl_weight
         return loss, (mse_loss, kl_loss)
 
     @jax.jit
@@ -391,7 +386,7 @@ def create_train_step(
 # %%
 key, model_key = jax.random.split(key)
 
-model = SVAE_LDS(latent_dims=latent_dims)
+model = Batched_SVAE_LDS(latent_dims=latent_dims)
 optimizer = optax.adam(learning_rate=1e-3)
 # optimizer = optax.sgd(learning_rate=1e-3)
 
@@ -432,7 +427,6 @@ plt.plot(running_loss, label='Total Loss')
 plt.plot(running_mse, label='MSE Loss')
 plt.plot(running_kl, label='KL Loss')
 
-plt.ylim(-100, 200)
 plt.legend()
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
@@ -443,14 +437,19 @@ restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(pa
 def create_pred_step(model: nn.Module, params):
     @jax.jit
     def pred_step(x, key):
-        recon, q_dist, p_dist = model.apply(params, x, key)
+        recon, q_dist, p_dist = model.apply(params, x, random.split(key, x.shape[0]))
         return recon, q_dist, p_dist
     
     return pred_step
 
 sample_batch = process_batch(next(iter(test_dataloader)))
 pred_step = create_pred_step(model, restored_params)
-    # %%
+# %%
+print("learned parameters", restored_params["params"].keys())
+print("A", restored_params["params"]["kf_A"])
+print("b", restored_params["params"]["kf_b"])
+print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
+# %%
 recon, q_dist, p_dist = pred_step(sample_batch, key)
 f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
 i = 0
@@ -461,15 +460,10 @@ ax[0].set_title('Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[:,i])
+ax[2].plot(q_dist.mean()[i])
 ax[2].set_title('Each Dimension of the Latent Variable')
 
 plt.show()
-# %%
-print("learned parameters", restored_params["params"].keys())
-print("A", restored_params["params"]["kf_A"])
-print("b", restored_params["params"]["kf_b"])
-print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %%
 masked_batch = sample_batch.at[:,10:40].set(0)
 recon, q_dist, p_dist = pred_step(masked_batch, key)
@@ -483,52 +477,8 @@ ax[0].set_title('Masked Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[:,i])
+ax[2].plot(q_dist.mean()[i])
 ax[2].set_title('Each Dimension of the Latent Variable')
 
 plt.show()
-# %%
-# params = model.init(key, setup_batch, random.PRNGKey(0))
-
-# x=setup_batch
-x=batch
-
-recon, q_dist, p_dist = model.apply(params, x, subkey)
-
-mse_loss = optax.l2_loss(recon, x).sum() / x.shape[0]
-print(f"{mse_loss=}")
-
-def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
-    q_z, p_z = dists
-
-    # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
-    p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
-
-    # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-    log_one_over_p_x = jnp.log(p_zi_given_x1toisub1[0]) + jnp.log(q_z.multiply(p_zi_given_x1toisub1[1])[0])
-    jax.debug.print("one_over_p_x: {log_one_over_p_x}", log_one_over_p_x=log_one_over_p_x)
-
-    k = q_z.mean().shape[-1]
-    # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
-    kl = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z.covariance()))) + log_one_over_p_x
-
-    return q_z, kl
-
-bs = x.shape[0]
-_, kl_loss = jax.lax.scan(kl_wrapper,
-                            MultivariateNormalFullCovariance(
-                                jnp.zeros((bs, latent_dims)),
-                                jnp.stack([jnp.eye(latent_dims)] * bs)
-                            ),
-                            (q_dist, p_dist))
-
-kl_loss = jnp.sum(kl_loss) / x.shape[0]
-print(f"{kl_loss=}")
-
-loss = mse_loss + kl_weight * kl_loss
-print(f"{loss=}")
-# %%
-q_z = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
-p_z = MultivariateNormalFullCovariance(p_dist.mean()[0], p_dist.covariance()[0])
-q_z_sub_1 = MultivariateNormalFullCovariance(jnp.zeros((bs, latent_dims)),jnp.stack([jnp.eye(latent_dims)] * bs))
 # %%
