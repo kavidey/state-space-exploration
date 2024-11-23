@@ -11,6 +11,7 @@ tfd = tfp.distributions
 tfb = tfp.bijectors
 
 from lib.distributions import MultivariateNormalFullCovariance
+from lib.priors import KalmanFilter
 
 key = random.PRNGKey(42)
 # %% [markdown]
@@ -44,74 +45,6 @@ model = tfd.LinearGaussianStateSpaceModel(
     initial_state_prior=initial_state_prior,
 )
 # %%
-latent_dims = ndims
-
-class KalmanFilter:
-    def __call__(self, z, prior, z_rng, A, b, Q, H):
-        z_t_sub_1 = prior
-
-        def kf_forward(carry, z_t):
-            z_rng, z_t_sub_1 = carry
-
-            # Prediction
-            z_t_given_t_sub_1 = self.predict(z_t_sub_1, A, b, Q)
-
-            # Update
-            z_t_given_t = self.update(z_t_given_t_sub_1, z_t, H)
-
-            # Sample and decode
-            z_rng, z_t_rng = random.split(z_rng)
-            z_hat = z_t_given_t.sample(z_t_rng)
-
-            # jax.debug.print("z_t_given_t_sub_1: {z_t_given_t_sub_1}", z_t_given_t_sub_1=z_t_given_t_sub_1)
-            # jax.debug.print("z_t_given_t: {z_t_given_t}", z_t_given_t=z_t_given_t)
-
-            return (z_rng, z_t_given_t), (z_hat, z_t_given_t, z_t_given_t_sub_1) # carry, (z_recon, q_dist, p_dist)
-        
-        _, result = jax.lax.scan(kf_forward, (z_rng, z_t_sub_1), z)
-        z_recon, q_dist, p_dist = result
-
-        return z_recon, q_dist, p_dist
-
-    def predict(self, z_t, A, b, Q):
-        """
-        P(z_t+1 | x_t, ..., x_1) = P(z_t+1 | z_t)
-        """
-        # z_t|t-1 = A @ z_t-1|t-1 + b
-        mu = jnp.dot(z_t.mean(), A) + b
-
-        # P_t|t-1 = A @ P_t-1|t-1 @ A^T + Q
-        sigma = A @ z_t.covariance() @ A.T + Q
-
-        return MultivariateNormalFullCovariance(mu, sigma)
-
-    def update(
-        self, z_t_given_t_sub_1: MultivariateNormalFullCovariance, x_t: jnp.array, H: jnp.array
-    ):
-        """
-        Kalman filter update step
-        P(z_t+1 | x_t+1, ... , x_1) ~= P(x_t+1 | z_t+1) * P(z_t+1 | x_t, ... x_1)
-
-        Args:
-            z_t_given_t_sub_1 (MultivariateNormalFullCovariance): z_t|t-1
-            x_t (MultivariateNormalFullCovariance): x_t
-
-        Returns:
-            MultivariateNormalFullCovariance: z_t|t
-        """
-
-        # K_t = P_t|t-1 @ H^T @ (H @ P_t|t-1 @ H^T + R) ^ -1
-        K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + x_t.covariance())
-
-        # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
-        # Extra expand_dims and squeeze are necessary to make the matmul dimensions work
-        mu = z_t_given_t_sub_1.mean() + K_t @ (x_t.mean() - H @ z_t_given_t_sub_1.mean())
-
-        # P_t|t = P_t|t-1 - K_t @ H @ P_t|t-1 = (I - K_t @ H) @ P_t|t-1
-        sigma = (jnp.eye(latent_dims) - K_t @ H) @ z_t_given_t_sub_1.covariance()
-
-        return MultivariateNormalFullCovariance(mu, sigma)
-# %%
 key, tmpkey = random.split(key)
 x = model.sample(1, tmpkey)  # Sample from the prior on sequences of observations.
 # %%
@@ -131,21 +64,20 @@ initial_location_posterior = tfd.MultivariateNormalTriL(
     scale_tril=jnp.linalg.cholesky(posterior_covs[..., 0, :, :]),
 )
 # %%
-kf = KalmanFilter()
 
 z = jax.vmap(lambda x: MultivariateNormalFullCovariance(x, observation_noise.covariance()))(x[0])
 
 key, tmpkey = random.split(key)
 prior = MultivariateNormalFullCovariance(initial_state_prior.mean(), initial_state_prior.covariance())
-_, _, our_filtered_dists = kf(z, prior, tmpkey, transition_matrix, jnp.zeros((latent_dims)), transition_noise.covariance(), observation_matrix)
+_, _, our_filtered_dists = KalmanFilter.run(z, prior, tmpkey, transition_matrix, jnp.zeros((ndims)), transition_noise.covariance(), observation_matrix)
 our_filtered_means = our_filtered_dists.mean()
 # %%
 fig, axs = plt.subplots(1, 2, figsize=(10,5))
 
 axs[0].plot(x[0, :, 0], x[0, :, 1], label="Samples")
 axs[0].plot(filtered_means[0, :, 0], filtered_means[0, :, 1], label="TFP Filtered Means")
-axs[0].plot(posterior_means[0, :, 0], posterior_means[0, :, 1], label="TFP Smoothed Means")
 axs[0].plot(our_filtered_means[:, 0], our_filtered_means[:, 1], label="Our Smoothed Means")
+axs[0].plot(posterior_means[0, :, 0], posterior_means[0, :, 1], label="TFP Smoothed Means")
 axs[0].legend()
 axs[0].set_xlabel("x")
 axs[0].set_ylabel("y")
