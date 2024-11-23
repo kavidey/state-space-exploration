@@ -23,6 +23,8 @@ tfd = tfp.distributions
 tfb = tfp.bijectors
 # tfpk = tfp.math.psd_kernels
 
+from lib.distributions import MultivariateNormalFullCovariance
+
 # jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
 # %%
@@ -32,7 +34,7 @@ epochs = 5000
 batch_size = 32
 
 latent_dims = 4
-kl_weight = 1
+kl_weight = 0.5
 kl_ramp = 1000 # The epoch where the KL weight reaches its final value
 A_init_epsilon = 0.01
 Q_init_stdev = 0.02
@@ -93,61 +95,6 @@ test_dataloader = torch.utils.data.DataLoader(train_dset, batch_size=batch_size)
 
 process_batch = jnp.array
 setup_batch = process_batch(next(iter(train_dataloader)))
-
-# %%
-class MultivariateNormalFullCovariance:
-    def __init__(self, mean: jnp.ndarray, covariance: jnp.ndarray):
-        self.__mean = mean
-        self.__covariance = covariance
-
-    def mean(self):
-        return self.__mean
-
-    def covariance(self):
-        return self.__covariance
-
-    @jax.jit
-    def sample(self, seed):
-        d = self.__mean.shape[-1]
-
-        # https://juanitorduz.github.io/multivariate_normal/
-        # Could also use https://jax.readthedocs.io/en/latest/_autosummary/jax.random.multivariate_normal.html
-        epsilon = 0.0001
-        K = self.__covariance + jnp.identity(d) * epsilon
-
-        L = jnp.linalg.cholesky(K)
-        u = random.normal(seed, (d,))
-
-        return self.__mean + jnp.dot(u, L)
-
-    def __repr__(self) -> str:
-        return f"MultivariateNormalFullCovariance(mu={self.__mean}, sigma={self.__covariance})"
-    
-    def _tree_flatten(self):
-        children = (self.__mean, self.__covariance)  # arrays / dynamic values
-        aux_data = {}  # static values
-        return (children, aux_data)
-    
-    @classmethod
-    def _tree_unflatten(cls, aux_data, children):
-        return cls(*children, **aux_data)
-    
-    def multiply(self, other: "MultivariateNormalFullCovariance") -> Tuple[float, "MultivariateNormalFullCovariance"]:
-        c = (1/(jnp.sqrt(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))))) * \
-            jnp.exp(-(1/2)*(self.mean()-other.mean()) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ (self.mean()-other.mean()))
-
-        s_cov_inv = jnp.linalg.inv(self.covariance())
-        o_cov_inv = jnp.linalg.inv(other.covariance())
-
-        cov = jnp.linalg.inv(s_cov_inv+o_cov_inv)
-        mean = cov @ (s_cov_inv @ self.mean().T + o_cov_inv @ other.mean().T)
-        
-        return c, MultivariateNormalFullCovariance(mean, cov)
-
-jax.tree_util.register_pytree_node(MultivariateNormalFullCovariance,
-                               MultivariateNormalFullCovariance._tree_flatten,
-                               MultivariateNormalFullCovariance._tree_unflatten)
-
 # %%
 def initializer_diag_with_noise(epsilon: float):
     '''
@@ -229,7 +176,7 @@ class SVAE_LDS(nn.Module):
             z_t_given_t_sub_1 = self.predict(z_t_sub_1, self.A, self.b, self.Q())
 
             # Update
-            z_t_given_t = self.update(z_t_given_t_sub_1, z_t)
+            z_t_given_t = self.update(z_t_given_t_sub_1, z_t, jnp.eye(latent_dims))
 
             # Sample and decode
             z_rng, z_t_rng = random.split(z_rng)
@@ -259,7 +206,7 @@ class SVAE_LDS(nn.Module):
         return MultivariateNormalFullCovariance(mu, sigma)
 
     def update(
-        self, z_t_given_t_sub_1: MultivariateNormalFullCovariance, x_t: jnp.array
+        self, z_t_given_t_sub_1: MultivariateNormalFullCovariance, x_t: jnp.array, H: jnp.array
     ):
         """
         Kalman filter update step
@@ -272,8 +219,6 @@ class SVAE_LDS(nn.Module):
         Returns:
             MultivariateNormalFullCovariance: z_t|t
         """
-
-        H = jnp.eye(latent_dims)
 
         # K_t = P_t|t-1 @ H^T @ (H @ P_t|t-1 @ H^T + R) ^ -1
         K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + x_t.covariance())
