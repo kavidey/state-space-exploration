@@ -6,32 +6,33 @@ from lib.distributions import MultivariateNormalFullCovariance
 
 class KalmanFilter:
     @staticmethod
-    def run(z, prior, z_rng, A, b, Q, H):
-        z_t_sub_1 = prior
-
-        def kf_forward(carry, z_t):
-            z_rng, z_t_sub_1 = carry
-
-            # Prediction
-            z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
-
-            # Update
-            z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H)
-
-            # Sample and decode
-            z_rng, z_t_rng = jax.random.split(z_rng)
-            z_hat = z_t_given_t.sample(z_t_rng)
-
-            # jax.debug.print("z_t_given_t_sub_1: {z_t_given_t_sub_1}", z_t_given_t_sub_1=z_t_given_t_sub_1)
-            # jax.debug.print("z_t_given_t: {z_t_given_t}", z_t_given_t=z_t_given_t)
-
-            return (z_rng, z_t_given_t), (z_hat, z_t_given_t, z_t_given_t_sub_1) # carry, (z_recon, q_dist, p_dist)
+    def run(z, z_t_sub_1, z_rng, A, b, Q, H):
+        kf_forward = lambda carry, z_t: KalmanFilter.forward(carry, z_t, A, b, Q, H)
         
         _, result = jax.lax.scan(kf_forward, (z_rng, z_t_sub_1), z)
         z_recon, q_dist, p_dist = result
 
         return z_recon, q_dist, p_dist
+    
+    @staticmethod
+    def forward(carry, z_t, A, b, Q, H):
+        z_rng, z_t_sub_1 = carry
 
+        # Prediction
+        z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
+
+        # Update
+        z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H)
+
+        # Sample and decode
+        z_rng, z_t_rng = jax.random.split(z_rng)
+        z_hat = z_t_given_t.sample(z_t_rng)
+
+        # jax.debug.print("z_t_given_t_sub_1: {z_t_given_t_sub_1}", z_t_given_t_sub_1=z_t_given_t_sub_1)
+        # jax.debug.print("z_t_given_t: {z_t_given_t}", z_t_given_t=z_t_given_t)
+
+        return (z_rng, z_t_given_t), (z_hat, z_t_given_t, z_t_given_t_sub_1) # carry, (z_recon, q_dist, p_dist)
+    
     @staticmethod
     def predict(z_t, A, b, Q):
         """
