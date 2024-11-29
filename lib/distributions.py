@@ -40,8 +40,18 @@ class MultivariateNormalFullCovariance:
         return cls(*children, **aux_data)
     
     def multiply(self, other: "MultivariateNormalFullCovariance") -> Tuple[float, "MultivariateNormalFullCovariance"]:
-        c = (1/(jnp.sqrt(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))))) * \
-            jnp.exp(-(1/2)*(self.mean()-other.mean()) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ (self.mean()-other.mean()))
+        """
+        Calculates the product of this distribution and another 
+        
+        Source: the matrix cookbook eqn 371
+
+        Returns:
+            float: log of the normalization constant
+            MultivariateNormalFullCovariance: updated distribution
+        """
+        # c = (1/(jnp.sqrt(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))))) * \
+        #     jnp.exp(-(1/2)*(self.mean()-other.mean()) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ (self.mean()-other.mean()))
+        c = -(1/2) * (jnp.log(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))) + (self.mean()-other.mean()) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ (self.mean()-other.mean()))
 
         s_cov_inv = jnp.linalg.inv(self.covariance())
         o_cov_inv = jnp.linalg.inv(other.covariance())
