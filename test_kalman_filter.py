@@ -69,7 +69,7 @@ z = jax.vmap(lambda x: MultivariateNormalFullCovariance(x, observation_noise.cov
 
 key, tmpkey = random.split(key)
 prior = MultivariateNormalFullCovariance(initial_state_prior.mean(), initial_state_prior.covariance())
-_, _, our_filtered_dists = KalmanFilter.run(z, prior, tmpkey, transition_matrix, jnp.zeros((ndims)), transition_noise.covariance(), observation_matrix)
+_, _, our_filtered_dists = KalmanFilter.run_forward(z, prior, tmpkey, transition_matrix, jnp.zeros((ndims)), transition_noise.covariance(), observation_matrix)
 our_filtered_means = our_filtered_dists.mean()
 # %%
 fig, axs = plt.subplots(1, 2, figsize=(10,5))

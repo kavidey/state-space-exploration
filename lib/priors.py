@@ -6,7 +6,10 @@ from lib.distributions import MultivariateNormalFullCovariance
 
 class KalmanFilter:
     @staticmethod
-    def run(z, z_t_sub_1, z_rng, A, b, Q, H):
+    def run_forward(z, z_t_sub_1, z_rng, A, b, Q, H):
+        """
+        Run Kalman Filter forward pass on a sequence of distributions and return results
+        """
         kf_forward = lambda carry, z_t: KalmanFilter.forward(carry, z_t, A, b, Q, H)
         
         _, result = jax.lax.scan(kf_forward, (z_rng, z_t_sub_1), z)
@@ -16,6 +19,9 @@ class KalmanFilter:
     
     @staticmethod
     def forward(carry, z_t, A, b, Q, H):
+        """
+        Single iteration of Kalman Filter forward pass
+        """
         z_rng, z_t_sub_1 = carry
 
         # Prediction
@@ -27,9 +33,6 @@ class KalmanFilter:
         # Sample and decode
         z_rng, z_t_rng = jax.random.split(z_rng)
         z_hat = z_t_given_t.sample(z_t_rng)
-
-        # jax.debug.print("z_t_given_t_sub_1: {z_t_given_t_sub_1}", z_t_given_t_sub_1=z_t_given_t_sub_1)
-        # jax.debug.print("z_t_given_t: {z_t_given_t}", z_t_given_t=z_t_given_t)
 
         return (z_rng, z_t_given_t), (z_hat, z_t_given_t, z_t_given_t_sub_1) # carry, (z_recon, q_dist, p_dist)
     
@@ -66,7 +69,6 @@ class KalmanFilter:
         K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(H @ z_t_given_t_sub_1.covariance() @ H.T + x_t.covariance())
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
-        # Extra expand_dims and squeeze are necessary to make the matmul dimensions work
         mu = z_t_given_t_sub_1.mean() + K_t @ (x_t.mean() - H @ z_t_given_t_sub_1.mean())
 
         # P_t|t = P_t|t-1 - K_t @ H @ P_t|t-1 = (I - K_t @ H) @ P_t|t-1
