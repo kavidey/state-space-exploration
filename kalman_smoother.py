@@ -11,6 +11,7 @@ import torch
 
 import jax
 import jax.numpy as jnp
+
 import jax.random as random
 import numpy as np
 
@@ -189,10 +190,11 @@ class SVAE_LDS(nn.Module):
             jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
         )
 
-        z_recon, q_dist, p_dist = KalmanFilter.run_forward(z_hat, z_t_sub_1, z_rng, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+        f_dist, p_dist = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+        z_recon, q_dist = KalmanFilter.run_backward(f_dist, z_rng, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
         x_recon = self.decoder(z_recon)
 
-        return x_recon, z_recon, z_hat, q_dist, p_dist
+        return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist
 
     def Q(self):
         return vec_to_cov_cholesky.forward(self.Q_param)
@@ -320,7 +322,7 @@ def create_train_step(
     def loss_fn(params, x, key, kl_weight):
         bs = x.shape[0]
 
-        recon, z_recon, z_hat, q_dist, p_dist = model.apply(params, x, random.split(key, x.shape[0]))
+        recon, z_recon, z_hat, f_dist, q_dist, p_dist = model.apply(params, x, random.split(key, x.shape[0]))
 
         def unbatched_loss(x, recon, z_hat, q_dist, p_dist):
             mse_loss = optax.l2_loss(recon, x)
@@ -339,7 +341,7 @@ def create_train_step(
             z_hat1 = MultivariateNormalFullCovariance(z_hat.mean()[0], z_hat.covariance()[0])
             p_z1 = MultivariateNormalFullCovariance(jnp.zeros((latent_dims)), jnp.eye(latent_dims))
             q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
-            kl_loss_0 = -observation_likelihood(z_hat1, q_z1, p_z1) - q_z1.multiply(p_z1)[0]
+            kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - q_z1.multiply(p_z1)[0]
 
             # Calculate the rest of the terms
             def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
@@ -353,7 +355,7 @@ def create_train_step(
                 # jax.debug.print("one_over_p_x: {log_one_over_p_x}", log_one_over_p_x=log_one_over_p_x)
 
                 # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
-                kl = -observation_likelihood(z_hat, q_z, p_z) - log_p_x
+                kl = observation_likelihood(z_hat, q_z, p_z) - log_p_x
                 # jax.debug.print("observation_likelihood={a} log_one_over_p_x={b}", a=observation_likelihood(z_hat, q_z, p_z), b=log_one_over_p_x)
                 # kl = - (q_z.mean() - z_hat.mean()).T @ jnp.linalg.inv(z_hat.covariance()) @ (q_z.mean() - z_hat.mean()) 
 
@@ -460,8 +462,8 @@ restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(pa
 def create_pred_step(model: nn.Module, params):
     @jax.jit
     def pred_step(x, key):
-        x_recon, z_recon, z_hat, q_dist, p_dist = model.apply(params, x, random.split(key, x.shape[0]))
-        return x_recon, z_recon, z_hat, q_dist, p_dist
+        x_recon, z_recon, z_hat, f_dist, q_dist, p_dist = model.apply(params, x, random.split(key, x.shape[0]))
+        return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist
     
     return pred_step
 
@@ -473,7 +475,7 @@ print("A", restored_params["params"]["kf_A"])
 print("b", restored_params["params"]["kf_b"])
 print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %% LDS Reconstruction
-recon, z_recon, z_hat, q_dist, p_dist = pred_step(sample_batch, key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist = pred_step(sample_batch, key)
 f, ax = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
 i = 0
@@ -493,7 +495,7 @@ ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 plt.show()
 # %% LDS Imputation
 masked_batch = sample_batch.at[:,10:40].set(0)
-recon, z_recon, z_hat, q_dist, p_dist = pred_step(masked_batch, key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist = pred_step(masked_batch, key)
 
 f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
