@@ -38,9 +38,9 @@ key = random.PRNGKey(42)
 
 batch_size = 64
 validation_split = 0.2
-epochs = 50
+epochs = 10
 
-kl_weight = 10
+kl_weight = 1
 latent_dims = 2
 
 checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
@@ -185,9 +185,9 @@ mngr.wait_until_finished()
 plt.plot(running_loss)
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
-plt.show()
 # %% Sample
-restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
+restored_params = mngr.restore(mngr.latest_step(), params)
+
 def build_sample_fn(model, params):
     def sample_fn(z: jnp.array) -> jnp.array:
         return model.apply(params, z, method=model.decode)

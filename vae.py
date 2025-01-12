@@ -51,7 +51,6 @@ dataset_path = Path("minst_dataset")
 dataset_path.mkdir(exist_ok=True)
 
 options = ocp.CheckpointManagerOptions(max_to_keep=3, save_interval_steps=2)
-# mngr = ocp.CheckpointManager(checkpoint_path, ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler()), options=options)
 mngr = ocp.CheckpointManager(checkpoint_path, options=options)
 # %%
 train_dataset = MNIST(dataset_path, train=True, transform=T.ToTensor(), download=True)
@@ -171,7 +170,7 @@ plt.plot(running_loss)
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 # %% Sample
-restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
+restored_params = mngr.restore(mngr.latest_step(), params)
 
 
 def build_sample_fn(model, params):

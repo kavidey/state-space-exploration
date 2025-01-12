@@ -285,7 +285,7 @@ for epoch in pbar:
     mngr.save(epoch, args=ocp.args.StandardSave(warmup_params))
 mngr.wait_until_finished()
 # %% VAE Reconstruction and Evaluation
-restored_warmup_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(warmup_params))
+restored_warmup_params = mngr.restore(mngr.latest_step(), warmup_params)
 
 def create_pred_step(model: nn.Module, params):
     @jax.jit
@@ -457,7 +457,7 @@ plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.show()
 # %% LDS Evaluation
-restored_params = mngr.restore(mngr.latest_step(), args=ocp.args.StandardSave(params))
+restored_params = mngr.restore(mngr.latest_step(), params)
 
 def create_pred_step(model: nn.Module, params):
     @jax.jit

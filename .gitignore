@@ -2,3 +2,4 @@ minst_dataset/
 *_checkpoints*/
 .DS_Store
 __pycache__
+.python-version
