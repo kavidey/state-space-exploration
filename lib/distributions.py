@@ -51,7 +51,10 @@ class MultivariateNormalFullCovariance:
         """
         # c = (1/(jnp.sqrt(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))))) * \
         #     jnp.exp(-(1/2)*(self.mean()-other.mean()) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ (self.mean()-other.mean()))
-        c = -(1/2) * (jnp.log(jnp.linalg.det(2*jnp.pi*(self.covariance() + other.covariance()))) + (self.mean()-other.mean()) @ jnp.linalg.inv(self.covariance() + other.covariance()) @ (self.mean()-other.mean()))
+        k = self.mean().shape[-1]
+        mean_diff = self.mean() - other.mean()
+        cov = self.covariance() + other.covariance()
+        c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
 
         s_cov_inv = jnp.linalg.inv(self.covariance())
         o_cov_inv = jnp.linalg.inv(other.covariance())
@@ -60,6 +63,12 @@ class MultivariateNormalFullCovariance:
         mean = cov @ (s_cov_inv @ self.mean().T + o_cov_inv @ other.mean().T)
         
         return c, MultivariateNormalFullCovariance(mean, cov)
+
+    def log_likelihood(self, x):
+        k = self.mean().shape[-1]
+        mean_diff = self.mean() - x
+        log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(self.covariance())) + mean_diff.T @ jnp.linalg.inv(self.covariance()) @ mean_diff)
+        return log_likelihood
 
 jax.tree_util.register_pytree_node(MultivariateNormalFullCovariance,
                                MultivariateNormalFullCovariance._tree_flatten,

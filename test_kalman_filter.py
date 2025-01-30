@@ -13,6 +13,8 @@ tfb = tfp.bijectors
 
 from lib.distributions import MultivariateNormalFullCovariance
 from lib.priors import KalmanFilter
+
+jax.config.update("jax_enable_x64", True)
 # %% [markdown]
 # Example from: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/LinearGaussianStateSpaceModel#examples
 #
@@ -24,7 +26,7 @@ from lib.priors import KalmanFilter
 timesteps = 1
 ndims = 2
 step_std = 1.0
-noise_std = 5.0
+noise_std = 2.0
 
 transition_matrix = jnp.eye(ndims)
 transition_noise = tfd.MultivariateNormalDiag(
@@ -176,15 +178,32 @@ z_hat = z
 q_dist = our_posterior_dists
 p_dist = our_predicted_dists
 
+def kl_divergence(
+    q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
+):
+    mu_0 = q.mean()
+    sigma_0 = q.covariance()
+
+    mu_1 = p.mean()
+    sigma_1 = p.covariance()
+
+    k = mu_0.shape[-1]
+
+    # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
+    a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
+    mean_diff = mu_1 - mu_0
+    b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
+    # print(f"Working KL: {b-k}")
+    c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
+    return 0.5 * (a + b - k + c)
+
 def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: MultivariateNormalFullCovariance, p_z: MultivariateNormalFullCovariance):
     k = z_hat.mean().shape[-1]
     # -1/2 ( k*log(2pi) + log(det(Sigma_i)) + (x_i - mu_i)^T @ Sigma_i^-1 @ (x_i - mu_i) + tr(P_i Sigma_i^-1) )
-    mean_diff = q_z.mean() - z_hat.mean()
+    mean_diff = z_hat.mean() - q_z.mean()
     inv_cov = jnp.linalg.inv(z_hat.covariance())
-    return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
-    # jax.debug.print("{a} {b} {c}", a=mean_diff, b=z_hat.covariance(), c=inv_cov)
-    # return -(1/2) * (mean_diff.T @ inv_cov @ mean_diff)
-
+    return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
+ 
 # The first term has a different equation the next ones because p(z_1) is known in closed form
 # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
 z_hat1 = MultivariateNormalFullCovariance(z_hat.mean()[0], z_hat.covariance()[0])
@@ -192,32 +211,32 @@ p_z1 = MultivariateNormalFullCovariance(jnp.zeros((latent_dims)), jnp.eye(latent
 q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
 kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - q_z1.multiply(p_z1)[0]
 
+# Correct KL Divergence
+kl_divergence(q_z1, p_z1)
+
 # Calculate the rest of the terms
-def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
-    z_hat, q_z, p_z = dists
+# def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
+#     z_hat, q_z, p_z = dists
 
-    # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
-    p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
+#     # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
+#     p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
 
-    # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-    log_p_x = p_zi_given_x1toisub1[0] + q_z.multiply(p_zi_given_x1toisub1[1])[0]
+#     # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+#     log_p_x = p_zi_given_x1toisub1[0] + q_z.multiply(p_zi_given_x1toisub1[1])[0]
+#     kl = observation_likelihood(z_hat, q_z, p_z) - log_p_x
 
-    # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
-    kl = observation_likelihood(z_hat, q_z, p_z) - log_p_x
-    # kl = log_p_x
-    # kl = observation_likelihood(z_hat, q_z, p_z)
+#     return q_z, kl
 
-    return q_z, kl
+# _, kl_loss_after0 = jax.lax.scan(kl_wrapper,
+#     q_z1,
+#     (
+#         MultivariateNormalFullCovariance(z_hat.mean()[1:], z_hat.covariance()[1:]),
+#         MultivariateNormalFullCovariance(q_dist.mean()[1:], q_dist.covariance()[1:]),
+#         MultivariateNormalFullCovariance(p_dist.mean()[1:], p_dist.covariance()[1:])
+#     )
+# )
+# kl_loss = jnp.append(jnp.array(kl_loss_0), kl_loss_after0)
 
-_, kl_loss_after0 = jax.lax.scan(kl_wrapper,
-    q_z1,
-    (
-        MultivariateNormalFullCovariance(z_hat.mean()[1:], z_hat.covariance()[1:]),
-        MultivariateNormalFullCovariance(q_dist.mean()[1:], q_dist.covariance()[1:]),
-        MultivariateNormalFullCovariance(p_dist.mean()[1:], p_dist.covariance()[1:])
-    )
-)
-kl_loss = jnp.append(jnp.array(kl_loss_0), kl_loss_after0)
-
-kl_loss
+# kl_loss
+# %%
 # %%

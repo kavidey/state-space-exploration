@@ -38,7 +38,7 @@ key = random.PRNGKey(42)
 
 batch_size = 64
 validation_split = 0.2
-epochs = 10
+epochs = 50
 
 kl_weight = 1
 latent_dims = 2
