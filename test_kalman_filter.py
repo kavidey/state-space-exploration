@@ -177,7 +177,7 @@ latent_dims = ndims
 z_hat = z
 q_dist = our_posterior_dists
 p_dist = our_predicted_dists
-
+# %%
 def kl_divergence(
     q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
 ):
@@ -209,7 +209,7 @@ def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: Multiva
 z_hat1 = MultivariateNormalFullCovariance(z_hat.mean()[0], z_hat.covariance()[0])
 p_z1 = MultivariateNormalFullCovariance(jnp.zeros((latent_dims)), jnp.eye(latent_dims))
 q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
-kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - q_z1.multiply(p_z1)[0]
+kl_loss_0 = observation_likelihood(z_hat1.multiply(p_z1)[1], q_z1, p_z1) - q_z1.multiply(p_z1)[0]
 
 # Correct KL Divergence
 kl_divergence(q_z1, p_z1)
@@ -239,4 +239,8 @@ kl_divergence(q_z1, p_z1)
 
 # kl_loss
 # %%
+post = p_z1.multiply(z_hat1)[1]
+kl_divergence(post, p_z1)
+# %%
+observation_likelihood(z_hat1, post, p_z1) - z_hat1.multiply(p_z1)[0]
 # %%
