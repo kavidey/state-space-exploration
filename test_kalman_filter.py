@@ -23,7 +23,7 @@ jax.config.update("jax_enable_x64", True)
 # The vehicle is assumed to move by a random walk with standard deviation step_std at each step,
 # and observation noise level std. We build the marginal distribution over noisy observations as a state space model:
 # %%
-timesteps = 1
+timesteps = 5
 ndims = 2
 step_std = 1.0
 noise_std = 2.0
@@ -139,7 +139,7 @@ our_predicted_means = our_predicted_dists.mean()
 _, our_posterior_dists = KalmanFilter.run_backward(our_filtered_dists, tmpkey, transition_matrix, jnp.zeros((ndims)), transition_noise.covariance(), observation_matrix)
 our_posterior_means = our_posterior_dists.mean()
 # %%
-fig, axs = plt.subplots(1, 3, figsize=(10,5))
+fig, axs = plt.subplots(1, 3, figsize=(12,5))
 
 axs[0].plot(x[0, :, 0], x[0, :, 1], label="Samples", marker='.')
 axs[0].plot(filtered_means[0, :, 0], filtered_means[0, :, 1], label="TFP Filtered Means", marker='.')
@@ -209,35 +209,36 @@ def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: Multiva
 z_hat1 = MultivariateNormalFullCovariance(z_hat.mean()[0], z_hat.covariance()[0])
 p_z1 = MultivariateNormalFullCovariance(jnp.zeros((latent_dims)), jnp.eye(latent_dims))
 q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
-kl_loss_0 = observation_likelihood(z_hat1.multiply(p_z1)[1], q_z1, p_z1) - q_z1.multiply(p_z1)[0]
+kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - z_hat1.multiply(p_z1)[0]
+print(kl_loss_0)
 
 # Correct KL Divergence
-kl_divergence(q_z1, p_z1)
+print(kl_divergence(q_z1, p_z1))
 
 # Calculate the rest of the terms
-# def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
-#     z_hat, q_z, p_z = dists
+def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
+    z_hat, q_z, p_z = dists
 
-#     # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
-#     p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
+    # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
+    p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
 
-#     # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-#     log_p_x = p_zi_given_x1toisub1[0] + q_z.multiply(p_zi_given_x1toisub1[1])[0]
-#     kl = observation_likelihood(z_hat, q_z, p_z) - log_p_x
+    # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+    log_p_x = p_zi_given_x1toisub1[0] + z_hat.multiply(p_zi_given_x1toisub1[1])[0]
+    kl = observation_likelihood(z_hat, q_z, p_z) - log_p_x
 
-#     return q_z, kl
+    return q_z, kl
 
-# _, kl_loss_after0 = jax.lax.scan(kl_wrapper,
-#     q_z1,
-#     (
-#         MultivariateNormalFullCovariance(z_hat.mean()[1:], z_hat.covariance()[1:]),
-#         MultivariateNormalFullCovariance(q_dist.mean()[1:], q_dist.covariance()[1:]),
-#         MultivariateNormalFullCovariance(p_dist.mean()[1:], p_dist.covariance()[1:])
-#     )
-# )
-# kl_loss = jnp.append(jnp.array(kl_loss_0), kl_loss_after0)
+_, kl_loss_after0 = jax.lax.scan(kl_wrapper,
+    q_z1,
+    (
+        MultivariateNormalFullCovariance(z_hat.mean()[1:], z_hat.covariance()[1:]),
+        MultivariateNormalFullCovariance(q_dist.mean()[1:], q_dist.covariance()[1:]),
+        MultivariateNormalFullCovariance(p_dist.mean()[1:], p_dist.covariance()[1:])
+    )
+)
+kl_loss = jnp.append(jnp.array(kl_loss_0), kl_loss_after0)
 
-# kl_loss
+kl_loss
 # %%
 post = p_z1.multiply(z_hat1)[1]
 kl_divergence(post, p_z1)

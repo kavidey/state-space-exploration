@@ -40,7 +40,7 @@ epochs = 150
 batch_size = 32
 latent_dims = 4
 
-kl_weight = 0.03
+kl_weight = 0.1
 kl_ramp = 30 # The epoch where the KL weight reaches its final value
 
 A_init_epsilon = 0.01
@@ -341,7 +341,7 @@ def create_train_step(
             z_hat1 = MultivariateNormalFullCovariance(z_hat.mean()[0], z_hat.covariance()[0])
             p_z1 = MultivariateNormalFullCovariance(jnp.zeros((latent_dims)), jnp.eye(latent_dims))
             q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
-            kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - q_z1.multiply(p_z1)[0]
+            kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - z_hat1.multiply(p_z1)[0]
 
             # Calculate the rest of the terms
             def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
@@ -351,7 +351,7 @@ def create_train_step(
                 p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
 
                 # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-                log_p_x = p_zi_given_x1toisub1[0] + q_z.multiply(p_zi_given_x1toisub1[1])[0]
+                log_p_x = p_zi_given_x1toisub1[0] + z_hat.multiply(p_zi_given_x1toisub1[1])[0]
                 # jax.debug.print("one_over_p_x: {log_one_over_p_x}", log_one_over_p_x=log_one_over_p_x)
 
                 # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
@@ -517,85 +517,4 @@ ax[4].plot(z_recon[i])
 ax[4].set_title('Latent Posterior Samples')
 
 plt.show()
-# %%
-x = batch
-recon, z_hat, q_dist, p_dist = model.apply(params, x, random.split(key, x.shape[0]))
-
-bs = x.shape[0]
-
-def unbatched_loss(x, recon, z_hat, q_dist, p_dist):
-    jax.debug.print("\n")
-    mse_loss = optax.l2_loss(recon, x)
-
-    def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: MultivariateNormalFullCovariance, p_z: MultivariateNormalFullCovariance):
-        k = z_hat.mean().shape[-1]
-        # -1/2 ( k*log(2pi) + log(det(Sigma_i)) + (x_i - mu_i)^T @ Sigma_i^-1 @ (x_i - mu_i) + tr(P_i Sigma_i^-1) )
-        mean_diff = z_hat.mean() - q_z.mean()
-        inv_cov = jnp.linalg.inv(z_hat.covariance())
-        # jax.debug.print("{a} {b} {c}", a=mean_diff, b=inv_cov, c=q_z.covariance())
-        # jax.debug.print("{z} {a} {b} {c} {d}", z=-(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov)),
-        #                 a=k * jnp.log(2*jnp.pi), b=jnp.log(jnp.linalg.det(q_z.covariance())), c=mean_diff.T @ inv_cov @ mean_diff, d=jnp.linalg.trace(q_z.covariance() @ inv_cov))
-        return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
-    
-    # The first term has a different equation the next ones because p(z_1) is known in closed form
-    # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
-    z_hat1 = MultivariateNormalFullCovariance(z_hat.mean()[0], z_hat.covariance()[0])
-    p_z1 = MultivariateNormalFullCovariance(jnp.zeros((latent_dims)), jnp.eye(latent_dims))
-    q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
-    kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - jnp.log(q_z1.multiply(p_z1)[0])
-
-    # Calculate the rest of the terms
-    def kl_wrapper(q_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
-        z_hat, q_z, p_z = dists
-
-        # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
-        p_zi_given_x1toisub1 = p_z.multiply(q_z_sub_1)
-
-        # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-        log_p_x = p_zi_given_x1toisub1[0] + q_z.multiply(p_zi_given_x1toisub1[1])[0]
-        # jax.debug.print("one_over_p_x: {log_one_over_p_x}", log_one_over_p_x=log_one_over_p_x)
-
-        # -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
-        kl = observation_likelihood(z_hat, q_z, p_z) - log_p_x
-        jax.debug.print("{a} {b} {c}", a=observation_likelihood(z_hat, q_z, p_z), b=log_p_x, c=kl)
-
-        return q_z, kl
-
-    _, kl_loss_after0 = jax.lax.scan(kl_wrapper,
-        q_z1,
-        (
-            MultivariateNormalFullCovariance(z_hat.mean()[1:], z_hat.covariance()[1:]),
-            MultivariateNormalFullCovariance(q_dist.mean()[1:], q_dist.covariance()[1:]),
-            MultivariateNormalFullCovariance(p_dist.mean()[1:], p_dist.covariance()[1:])
-        )
-    )
-    kl_loss = jnp.append(jnp.array(kl_loss_0), kl_loss_after0)
-
-    return mse_loss, kl_loss
-
-losses = jax.vmap(unbatched_loss)(x, recon, z_hat, q_dist, p_dist)
-mse_loss = jnp.sum(losses[0]) / (bs * x.shape[1])
-kl_loss = jnp.sum(losses[1]) / (bs * x.shape[1])
-
-loss = mse_loss + kl_loss * kl_weight
-loss
-# %%
-losses = unbatched_loss(x[23],
-               recon[23],
-               MultivariateNormalFullCovariance(z_hat.mean()[23], z_hat.covariance()[23]),
-               MultivariateNormalFullCovariance(q_dist.mean()[23], q_dist.covariance()[23]),
-               MultivariateNormalFullCovariance(p_dist.mean()[23], p_dist.covariance()[23])
-)
-losses
-# %%
-i = 2
-z_hat = MultivariateNormalFullCovariance(z_hat.mean()[23, i], z_hat.covariance()[23, i])
-q_z = MultivariateNormalFullCovariance(q_dist.mean()[23, i], q_dist.covariance()[23, i])
-
-k = z_hat.mean().shape[-1]
-# -1/2 ( k*log(2pi) + log(det(Sigma_i)) + (x_i - mu_i)^T @ Sigma_i^-1 @ (x_i - mu_i) + tr(P_i Sigma_i^-1) )
-mean_diff = z_hat.mean() - q_z.mean()
-inv_cov = jnp.linalg.inv(z_hat.covariance())
--(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(q_z.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
-
 # %%
