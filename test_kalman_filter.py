@@ -4,174 +4,109 @@ import matplotlib.pyplot as plt
 
 import jax
 import jax.numpy as jnp
-import jax.random as random
+import jax.random as jnr
 
 from tensorflow_probability.substrates import jax as tfp
 
-tfd = tfp.distributions
-tfb = tfp.bijectors
+from dynamax.utils.plotting import plot_uncertainty_ellipses
+from dynamax.linear_gaussian_ssm import LinearGaussianSSM
+from dynamax.linear_gaussian_ssm import lgssm_smoother, lgssm_filter
 
 from lib.distributions import MultivariateNormalFullCovariance
 from lib.priors import KalmanFilter
 
 jax.config.update("jax_enable_x64", True)
 # %% [markdown]
-# Example from: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/LinearGaussianStateSpaceModel#examples
-#
-# Consider a simple tracking model, in which a two-dimensional latent state represents the position of a vehicle,
-# and at each timestep we see a noisy observation of this position (e.g., a GPS reading).
-# The vehicle is assumed to move by a random walk with standard deviation step_std at each step,
-# and observation noise level std. We build the marginal distribution over noisy observations as a state space model:
+# dynamax code modified from the following example: https://probml.github.io/dynamax/notebooks/linear_gaussian_ssm/kf_tracking.html#
 # %%
-timesteps = 5
+timesteps = 10
 ndims = 2
-step_std = 1.0
-noise_std = 2.0
 
-transition_matrix = jnp.eye(ndims)
-transition_noise = tfd.MultivariateNormalDiag(
-    scale_diag=step_std**2 * jnp.ones([ndims])
-)
+step_std = 0.1
+noise_std = 0.1
+
+theta = -0.1
+transition_matrix = jnp.array([[jnp.cos(theta), -jnp.sin(theta)],[jnp.sin(theta), jnp.cos(theta)]]) #jnp.eye(ndims)
+transition_noise = jnp.eye(ndims) * step_std
 observation_matrix = jnp.eye(ndims)
-observation_noise = tfd.MultivariateNormalDiag(
-    scale_diag=noise_std**2 * jnp.ones([ndims])
-)
-initial_state_prior = tfd.MultivariateNormalDiag(scale_diag=jnp.ones([ndims]))
+observation_noise = jnp.eye(ndims) * noise_std
+initial_mean = jnp.ones(ndims) * 5
+initial_covariance = jnp.eye(ndims)
 
-model = tfd.LinearGaussianStateSpaceModel(
-    num_timesteps=timesteps,
-    transition_matrix=transition_matrix,
-    transition_noise=transition_noise,
-    observation_matrix=observation_matrix,
-    observation_noise=observation_noise,
-    initial_state_prior=initial_state_prior,
-)
-
-# From: https://github.com/zziz/kalman-filter
-class KalmanFilter2(object):
-    def __init__(self, F = None, B = None, H = None, Q = None, R = None, P = None, x0 = None):
-
-        if(F is None or H is None):
-            raise ValueError("Set proper system dynamics.")
-
-        self.n = F.shape[1]
-        self.m = H.shape[1]
-
-        self.F = F
-        self.H = H
-        self.B = 0 if B is None else B
-        self.Q = jnp.eye(self.n) if Q is None else Q
-        self.R = jnp.eye(self.n) if R is None else R
-        self.P = jnp.eye(self.n) if P is None else P
-        self.x = jnp.zeros((self.n, 1)) if x0 is None else x0
-
-    def predict(self, u = 0):
-        self.x = jnp.dot(self.F, self.x) #+ jnp.dot(self.B, u)
-        self.P = jnp.dot(jnp.dot(self.F, self.P), self.F.T) + self.Q
-        return self.x
-
-    def update(self, z):
-        y = z - jnp.dot(self.H, self.x)
-        S = self.R + jnp.dot(self.H, jnp.dot(self.P, self.H.T))
-        K = jnp.dot(jnp.dot(self.P, self.H.T), jnp.linalg.inv(S))
-        self.x = self.x + jnp.dot(K, y)
-        I = jnp.eye(self.n)
-        self.P = jnp.dot(jnp.dot(I - jnp.dot(K, self.H), self.P), 
-        	(I - jnp.dot(K, self.H)).T) + jnp.dot(jnp.dot(K, self.R), K.T)
-
-kf = KalmanFilter2(F=transition_matrix, B=None, H=observation_matrix, Q=transition_noise.covariance(), R=observation_noise.covariance(), P=initial_state_prior.covariance(), x0=initial_state_prior.mean())
+lgssm = LinearGaussianSSM(ndims, ndims)
+params, _ = lgssm.initialize(jnr.PRNGKey(0),
+                             initial_mean=initial_mean,
+                             initial_covariance=initial_covariance,
+                             dynamics_weights=transition_matrix,
+                             dynamics_covariance=transition_noise,
+                             emission_weights=observation_matrix,
+                             emission_covariance=observation_noise)
 # %%
-key = random.PRNGKey(42)
-key, tmpkey = random.split(key)
-x = model.sample(1, tmpkey)  # Sample from the prior on sequences of observations.
+key = jnr.PRNGKey(42)
+key, tmpkey = jnr.split(key)
+z_, x = lgssm.sample(params, key, timesteps)
 
-# x = jnp.expand_dims(jnp.vstack((jnp.linspace(0, 1000, timesteps),)*2).T, 0)
-
-model.log_prob(x[0])
+# Plot Data
+observation_marker_kwargs = {"marker": "o", "markerfacecolor": "none", "markeredgewidth": 2, "markersize": 8}
+fig1, ax1 = plt.subplots()
+ax1.plot(*z_[:, :2].T, marker="s", color="C0", label="true state")
+ax1.plot(*x.T, ls="", **observation_marker_kwargs, color="tab:green", label="emissions")
+ax1.legend(loc="upper left")
+ax1.axis("equal")
 # %%
-# Compute the filtered posterior on latent states given observations,
-# and extract the mean and covariance for the current (final) timestep.
-_, filtered_means, filtered_covs, predicted_means, predicted_covs, _, _ = model.forward_filter(x)
-# current_location_posterior = tfd.MultivariateNormalTriL(
-#     loc=filtered_means[..., -1, :],
-#     scale_tril=jnp.linalg.cholesky(filtered_covs[..., -1, :, :]),
-# )
-
-# Run a smoothing recursion to extract posterior marginals for locations
-# at previous timesteps.
-posterior_means, posterior_covs = model.posterior_marginals(x)
-initial_location_posterior = tfd.MultivariateNormalTriL(
-    loc=posterior_means[..., 0, :],
-    scale_tril=jnp.linalg.cholesky(posterior_covs[..., 0, :, :]),
-)
+lgssm_posterior = lgssm.filter(params, x)
+filtered_means = lgssm_posterior.filtered_means
+filtered_covs = lgssm_posterior.filtered_covariances
+print(lgssm_posterior.marginal_loglik)
 # %%
-predictions = []
-for z in x:
-    kf.predict()
-    print(kf.x, kf.P)
-    kf.update(z[0])
-    print(kf.x, kf.P)
+lgssm_posterior = lgssm.smoother(params, x)
+posterior_means = lgssm_posterior.smoothed_means
+posterior_covs = lgssm_posterior.smoothed_covariances
 # %%
-# Predict Step
-mu_t = transition_matrix @ jnp.array([0,0])
-sigma_t = transition_matrix @ initial_state_prior.covariance() @ transition_matrix.T + transition_noise.covariance()
-print("Predict")
-print(mu_t, sigma_t)
-print(predicted_means[0], predicted_covs[0])
+z = jax.vmap(lambda x: MultivariateNormalFullCovariance(x, observation_noise))(x)
 
-hat_x_t = mu_t
-S_t = sigma_t + observation_noise.covariance()
-K_t = sigma_t @ jnp.linalg.inv(S_t)
-
-mu = mu_t + K_t @ (x[0,0] - hat_x_t)
-sigma = sigma_t - K_t @ S_t @ K_t
-print("Update")
-print(mu, sigma)
-print(filtered_means[0], filtered_covs[0])
-# %%
-z = jax.vmap(lambda x: MultivariateNormalFullCovariance(x, observation_noise.covariance()))(x[0])
-
-key, tmpkey = random.split(key)
-prior = MultivariateNormalFullCovariance(initial_state_prior.mean(), initial_state_prior.covariance())
-our_filtered_dists, our_predicted_dists = KalmanFilter.run_forward(z, prior, transition_matrix, jnp.zeros((ndims)), transition_noise.covariance(), observation_matrix)
+key, tmpkey = jnr.split(key)
+prior = MultivariateNormalFullCovariance(initial_mean, initial_covariance)
+our_filtered_dists, our_predicted_dists = KalmanFilter.run_forward(z, prior, transition_matrix, jnp.zeros((ndims)), transition_noise, observation_matrix)
 our_filtered_means = our_filtered_dists.mean()
+our_filtered_covs = our_filtered_dists.covariance()
 our_predicted_means = our_predicted_dists.mean()
-_, our_posterior_dists = KalmanFilter.run_backward(our_filtered_dists, tmpkey, transition_matrix, jnp.zeros((ndims)), transition_noise.covariance(), observation_matrix)
+our_predicted_covs = our_predicted_dists.covariance()
+_, our_posterior_dists = KalmanFilter.run_backward(our_filtered_dists, tmpkey, transition_matrix, jnp.zeros((ndims)), transition_noise, observation_matrix)
 our_posterior_means = our_posterior_dists.mean()
+our_posterior_covs = our_posterior_dists.covariance()
 # %%
-fig, axs = plt.subplots(1, 3, figsize=(12,5))
+fig, ax = plt.subplots()
+ax.plot(*x.T, ls="", **observation_marker_kwargs, color="tab:green", label="observed")
+ax.plot(*z_[:, :2].T, ls="--", color="darkgrey", label="true state")
 
-axs[0].plot(x[0, :, 0], x[0, :, 1], label="Samples", marker='.')
-axs[0].plot(filtered_means[0, :, 0], filtered_means[0, :, 1], label="TFP Filtered Means", marker='.')
-axs[0].plot(our_filtered_means[:, 0], our_filtered_means[:, 1], label="Our Filtered Means", marker='.')
-axs[0].plot(posterior_means[0, :, 0], posterior_means[0, :, 1], label="TFP Smoothed Means", marker='.')
-axs[0].legend()
-axs[0].set_xlabel("x")
-axs[0].set_ylabel("y")
+ax.plot(filtered_means[:, 0], filtered_means[:, 1], color="tab:red", label="dynamax", linewidth=4)
+plot_uncertainty_ellipses(filtered_means, filtered_covs, ax, **{"edgecolor": "tab:red", "linewidth": 0.5})
 
-axs[1].plot(filtered_means[0, :, 0], filtered_means[0, :, 1], label="TFP Filtered Means", marker='.', c='tab:blue', linewidth=3)
-axs[1].scatter(filtered_means[0, 0, 0], filtered_means[0, 0, 1], c='tab:blue')
-axs[1].plot(our_filtered_means[:, 0], our_filtered_means[:, 1], label="Our Filtered Means", marker='.', c='tab:orange', linewidth=3)
-axs[1].scatter(our_filtered_means[0, 0], our_filtered_means[0, 1], c='tab:orange')
+ax.plot(our_filtered_means[:, 0], our_filtered_means[:, 1], color="tab:blue", label="ours")
+plot_uncertainty_ellipses(our_filtered_means, our_filtered_covs, ax, **{"edgecolor": "tab:blue", "linewidth": 0.5})
 
-axs[1].plot(predicted_means[0, :, 0], predicted_means[0, :, 1], label="TFP Predicted Means", marker='.', c='tab:green')
-# axs[1].scatter(predicted_means[0, 0, 0], predicted_means[0, 0, 1], c='tab:green')
-axs[1].plot(our_predicted_means[:, 0], our_predicted_means[:, 1], label="Our Predicted Means", marker='.', c='tab:red')
-# axs[1].scatter(our_predicted_means[0, 0], our_predicted_means[0, 1], c='tab:red')
+ax.plot(our_predicted_means[:, 0], our_predicted_means[:, 1], color="tab:orange", label="ours predicted")
+plot_uncertainty_ellipses(our_predicted_means, our_predicted_covs, ax, **{"edgecolor": "tab:orange", "linewidth": 0.5})
 
-axs[1].legend()
-axs[1].set_xlabel("x")
-axs[1].set_ylabel("y")
 
-axs[2].plot(posterior_means[0, :, 0], posterior_means[0, :, 1], label="TFP Smoothed Means", marker='.', c='tab:blue')
-axs[2].scatter(posterior_means[0, 0, 0], posterior_means[0, 0, 1], c='tab:blue')
-axs[2].plot(our_posterior_means[:, 0], our_posterior_means[:, 1], label="Our Smoothed Means", marker='.', c='tab:orange')
-axs[2].scatter(our_posterior_means[0, 0], our_posterior_means[0, 1], c='tab:orange')
-axs[2].legend()
-axs[2].set_xlabel("x")
-axs[2].set_ylabel("y")
+ax.axis("equal")
+ax.legend(loc="upper left")
+ax.set_title("Filtered Posterior Comparison")
+# %%
+fig, ax = plt.subplots()
+ax.plot(*x.T, ls="", **observation_marker_kwargs, color="tab:green", label="observed")
+ax.plot(*z_[:, :2].T, ls="--", color="darkgrey", label="true state")
 
-plt.show()
+ax.plot(posterior_means[:, 0], posterior_means[:, 1], color="tab:red", label="dynamax", linewidth=4)
+plot_uncertainty_ellipses(posterior_means, posterior_covs, ax, **{"edgecolor": "tab:red", "linewidth": 0.5})
+
+ax.plot(our_posterior_means[:, 0], our_posterior_means[:, 1], color="tab:blue", label="ours")
+plot_uncertainty_ellipses(our_posterior_means, our_posterior_covs, ax, **{"edgecolor": "tab:blue", "linewidth": 0.5})
+
+ax.axis("equal")
+ax.legend(loc="upper left")
+ax.set_title("Smoothed Posterior Comparison")
 # %%
 latent_dims = ndims
 z_hat = z
