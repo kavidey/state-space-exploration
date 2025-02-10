@@ -11,11 +11,35 @@ class KalmanFilter:
         Run Kalman Filter forward pass on a sequence of distributions and return results
         """
         kf_forward = lambda carry, z_t: KalmanFilter.forward(carry, z_t, A, b, Q, H)
-        
-        _, result = jax.lax.scan(kf_forward, (z_t_sub_1), z)
-        q_dist, p_dist = result
 
-        return q_dist, p_dist
+        q_1 = KalmanFilter.update(z_t_sub_1,
+                                  MultivariateNormalFullCovariance(z.mean()[0], z.covariance()[0]),
+                                  H)
+        p_1 = z_t_sub_1
+        if z.mean().shape[0] > 1:
+            _, result = jax.lax.scan(kf_forward, (q_1),
+                                    MultivariateNormalFullCovariance(z.mean()[1:], z.covariance()[1:]))
+            q_dist, p_dist = result
+
+            q_dist = MultivariateNormalFullCovariance(
+                jnp.vstack((jnp.expand_dims(q_1.mean(), axis=0), q_dist.mean())),
+                jnp.vstack((jnp.expand_dims(q_1.covariance(), axis=0), q_dist.covariance())),
+            )
+
+            p_dist = MultivariateNormalFullCovariance(
+                jnp.vstack((jnp.expand_dims(p_1.mean(), axis=0), p_dist.mean())),
+                jnp.vstack((jnp.expand_dims(p_1.covariance(), axis=0), p_dist.covariance())),
+            )
+
+            return q_dist, p_dist
+        else:
+            return MultivariateNormalFullCovariance(
+                jnp.expand_dims(q_1.mean(), axis=0),
+                jnp.expand_dims(q_1.covariance(), axis=0)
+            ), MultivariateNormalFullCovariance(
+                jnp.expand_dims(p_1.mean(), axis=0),
+                jnp.expand_dims(p_1.covariance(), axis=0)
+            )
     
     @staticmethod
     def forward(carry, z_t, A, b, Q, H):
