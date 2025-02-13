@@ -108,30 +108,26 @@ class KalmanFilter:
         return MultivariateNormalFullCovariance(mu, sigma)
     
     @staticmethod
-    def run_backward(p_dist, z_rng, A, b, Q, H):
+    def run_backward(p_dist, A, b, Q, H) -> MultivariateNormalFullCovariance:
         """
-        Run Kalman Filter forward pass on a sequence of distributions and return results
+        Run Kalman Filter backward pass on a sequence of distributions and return results
         """
-        tmpkey, z_rng = jax.random.split(z_rng)
-        kf_forward = lambda carry, z_t: KalmanFilter.backward(carry, z_t, A, b, Q, H)
+        kf_backward = lambda carry, z_t: KalmanFilter.backward(carry, z_t, A, b, Q, H)
         
-        p_dist_T = MultivariateNormalFullCovariance(p_dist.mean()[-1], p_dist.covariance()[-1])
-        p_dist_1_to_T_sub_1 = MultivariateNormalFullCovariance(p_dist.mean()[:-1], p_dist.covariance()[:-1])
-        _, result = jax.lax.scan(kf_forward, (z_rng, p_dist_T), p_dist_1_to_T_sub_1, reverse=True)
-        z_hat, p_dist = result
+        q_dist_T = MultivariateNormalFullCovariance(p_dist.mean()[-1], p_dist.covariance()[-1])
+        q_dist_1_to_T_sub_1 = MultivariateNormalFullCovariance(p_dist.mean()[:-1], p_dist.covariance()[:-1])
+        _, q_dist = jax.lax.scan(kf_backward, (q_dist_T), q_dist_1_to_T_sub_1, reverse=True)
 
-        p_dist = MultivariateNormalFullCovariance(
-            jnp.vstack((p_dist.mean(), jnp.expand_dims(p_dist_T.mean(), 0))),
-            jnp.vstack((p_dist.covariance(), jnp.expand_dims(p_dist_T.covariance(), 0)))
+        q_dist = MultivariateNormalFullCovariance(
+            jnp.vstack((q_dist.mean(), jnp.expand_dims(q_dist_T.mean(), 0))),
+            jnp.vstack((q_dist.covariance(), jnp.expand_dims(q_dist_T.covariance(), 0)))
         )
 
-        z_hat = jnp.vstack((z_hat, jnp.expand_dims(p_dist_T.sample(tmpkey), 0)))
-
-        return z_hat, p_dist
+        return q_dist
     
     @staticmethod
     def backward(carry, z_t: MultivariateNormalFullCovariance, A, b, Q, H):
-        z_rng, z_t_plus_1 = carry
+        z_t_plus_1 = carry
 
         # A @ P_t @ A^T + Q
         P_pred = A @ z_t.covariance() @ A.T + Q
@@ -143,13 +139,9 @@ class KalmanFilter:
         # mu_t|T = mu_t|1:t + K @ (mu_t+1|T - A @ mu_i|1:t)
         mu = z_t.mean() + K @ (z_t_plus_1.mean() - (A @ z_t.mean() + b)) # TODO: CHECK THE +b HERE
 
-        # P_t|T = P_t|1:t + K @ (P_t+1|T - P_t|1:t) @ K^T
-        sigma = z_t.covariance() + K @ (z_t_plus_1.covariance() - z_t.covariance()) @ K.T
+        # P_t|T = P_t|1:t + K @ (P_t+1|T - P_t+1|1:t) @ K^T
+        sigma = z_t.covariance() + K @ (z_t_plus_1.covariance() - P_pred) @ K.T
 
         z_t_given_T = MultivariateNormalFullCovariance(mu, sigma)
-        
-        # Sample and decode
-        z_rng, z_t_rng = jax.random.split(z_rng)
-        z_hat = z_t_given_T.sample(z_t_rng)
 
-        return (z_rng, z_t_given_T), (z_hat, z_t_given_T) # carry, (z_recon, posterior_dist)
+        return (z_t_given_T), (z_t_given_T) # carry, (posterior_dist)

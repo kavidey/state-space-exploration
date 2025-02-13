@@ -67,14 +67,13 @@ posterior_covs = lgssm_posterior.smoothed_covariances
 # %%
 z = jax.vmap(lambda x: MultivariateNormalFullCovariance(x, observation_noise))(x)
 
-key, tmpkey = jnr.split(key)
 prior = MultivariateNormalFullCovariance(initial_mean, initial_covariance)
 our_filtered_dists, our_predicted_dists, our_log_likelihood = KalmanFilter.run_forward(z, prior, transition_matrix, jnp.zeros((ndims)), transition_noise, observation_matrix)
 our_filtered_means = our_filtered_dists.mean()
 our_filtered_covs = our_filtered_dists.covariance()
 our_predicted_means = our_predicted_dists.mean()
 our_predicted_covs = our_predicted_dists.covariance()
-_, our_posterior_dists = KalmanFilter.run_backward(our_filtered_dists, tmpkey, transition_matrix, jnp.zeros((ndims)), transition_noise, observation_matrix)
+our_posterior_dists = KalmanFilter.run_backward(our_filtered_dists, transition_matrix, jnp.zeros((ndims)), transition_noise, observation_matrix)
 our_posterior_means = our_posterior_dists.mean()
 our_posterior_covs = our_posterior_dists.covariance()
 # %%
@@ -142,7 +141,7 @@ def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: Multiva
     inv_cov = jnp.linalg.inv(z_hat.covariance())
     return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
 
-kl_loss = jax.vmap(observation_likelihood)(z_hat, q_dist, p_dist)
+kl_loss = jax.vmap(observation_likelihood)(z_hat, q_dist, p_dist) - our_log_likelihood
 
 kl_loss
 # %%
