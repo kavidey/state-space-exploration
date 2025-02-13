@@ -19,7 +19,7 @@ jax.config.update("jax_enable_x64", True)
 # %% [markdown]
 # dynamax code modified from the following example: https://probml.github.io/dynamax/notebooks/linear_gaussian_ssm/kf_tracking.html#
 # %%
-timesteps = 1
+timesteps = 10
 ndims = 2
 
 step_std = 0.1
@@ -53,6 +53,8 @@ ax1.plot(*z_[:, :2].T, marker="s", color="C0", label="true state")
 ax1.plot(*x.T, ls="", **observation_marker_kwargs, color="tab:green", label="emissions")
 ax1.legend(loc="upper left")
 ax1.axis("equal")
+
+plt.show()
 # %%
 lgssm_posterior = lgssm.filter(params, x)
 filtered_means = lgssm_posterior.filtered_means
@@ -67,7 +69,7 @@ z = jax.vmap(lambda x: MultivariateNormalFullCovariance(x, observation_noise))(x
 
 key, tmpkey = jnr.split(key)
 prior = MultivariateNormalFullCovariance(initial_mean, initial_covariance)
-our_filtered_dists, our_predicted_dists = KalmanFilter.run_forward(z, prior, transition_matrix, jnp.zeros((ndims)), transition_noise, observation_matrix)
+our_filtered_dists, our_predicted_dists, our_log_likelihood = KalmanFilter.run_forward(z, prior, transition_matrix, jnp.zeros((ndims)), transition_noise, observation_matrix)
 our_filtered_means = our_filtered_dists.mean()
 our_filtered_covs = our_filtered_dists.covariance()
 our_predicted_means = our_predicted_dists.mean()
@@ -139,47 +141,11 @@ def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: Multiva
     mean_diff = z_hat.mean() - q_z.mean()
     inv_cov = jnp.linalg.inv(z_hat.covariance())
     return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
- 
-# The first term has a different equation the next ones because p(z_1) is known in closed form
-# -1/2 * (k*log(2pi) + log(det(Sigma_i))) - log(p(x))
-z_hat1 = MultivariateNormalFullCovariance(z_hat.mean()[0], z_hat.covariance()[0])
-p_z1 = MultivariateNormalFullCovariance(p_dist.mean()[0], p_dist.covariance()[0])
-f_z1 = MultivariateNormalFullCovariance(f_dist.mean()[0], f_dist.covariance()[0])
-q_z1 = MultivariateNormalFullCovariance(q_dist.mean()[0], q_dist.covariance()[0])
-kl_loss_0 = observation_likelihood(z_hat1, q_z1, p_z1) - z_hat1.multiply(p_z1)[0]
-print(kl_loss_0)
 
-# Correct KL Divergence
-print(kl_divergence(q_z1, p_z1))
-
-# Calculate the rest of the terms
-def kl_wrapper(f_z_sub_1: MultivariateNormalFullCovariance, dists: Tuple[MultivariateNormalFullCovariance, MultivariateNormalFullCovariance, MultivariateNormalFullCovariance]):
-    z_hat, q_z, f_z, p_z = dists
-
-    # p(z_i|x_{1:i-1}) = \int p(z_i|z_{1:i-1}) p(z_{i-1}|x_{1:i-1}) dz_{i-1}
-    p_zi_given_x1toisub1 = p_z.multiply(f_z_sub_1)
-
-    # p(x_i) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-    log_p_x = p_zi_given_x1toisub1[0] + z_hat.multiply(p_zi_given_x1toisub1[1])[0]
-    kl = observation_likelihood(z_hat, q_z, p_z) - log_p_x
-
-    return f_z, kl
-
-_, kl_loss_after0 = jax.lax.scan(kl_wrapper,
-    f_z1,
-    (
-        MultivariateNormalFullCovariance(z_hat.mean()[1:], z_hat.covariance()[1:]),
-        MultivariateNormalFullCovariance(q_dist.mean()[1:], q_dist.covariance()[1:]),
-        MultivariateNormalFullCovariance(f_dist.mean()[1:], f_dist.covariance()[1:]),
-        MultivariateNormalFullCovariance(p_dist.mean()[1:], p_dist.covariance()[1:])
-    )
-)
-kl_loss = jnp.append(jnp.array(kl_loss_0), kl_loss_after0)
+kl_loss = jax.vmap(observation_likelihood)(z_hat, q_dist, p_dist)
 
 kl_loss
 # %%
-post = p_z1.multiply(z_hat1)[1]
-kl_divergence(post, p_z1)
-# %%
-observation_likelihood(z_hat1, post, p_z1) - z_hat1.multiply(p_z1)[0]
+print(lgssm_posterior.marginal_loglik)
+print(our_log_likelihood.sum())
 # %%

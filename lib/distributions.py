@@ -1,6 +1,7 @@
 from typing import Tuple
 import jax
 import jax.numpy as jnp
+import jax.random as jnr
 
 class MultivariateNormalFullCovariance:
     def __init__(self, mean: jnp.ndarray, covariance: jnp.ndarray):
@@ -15,17 +16,19 @@ class MultivariateNormalFullCovariance:
 
     @jax.jit
     def sample(self, seed):
-        d = self.__mean.shape[-1]
 
         # https://juanitorduz.github.io/multivariate_normal/
         # Could also use https://jax.readthedocs.io/en/latest/_autosummary/jax.random.multivariate_normal.html
-        epsilon = 0.0001
-        K = self.__covariance + jnp.identity(d) * epsilon
+        # d = self.__mean.shape[-1]
+        # epsilon = 0.0001
+        # K = self.__covariance + jnp.identity(d) * epsilon
 
-        L = jnp.linalg.cholesky(K)
-        u = jax.random.normal(seed, (d,))
+        # L = jnp.linalg.cholesky(K)
+        # u = jnr.normal(seed, (d,))
 
-        return self.__mean + jnp.dot(u, L)
+        # return self.__mean + jnp.dot(u, L)
+
+        return jnr.multivariate_normal(seed, self.__mean, self.__covariance)
 
     def __repr__(self) -> str:
         return f"MultivariateNormalFullCovariance(mu={self.__mean}, sigma={self.__covariance})"

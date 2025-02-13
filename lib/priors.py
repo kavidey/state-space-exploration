@@ -12,14 +12,16 @@ class KalmanFilter:
         """
         kf_forward = lambda carry, z_t: KalmanFilter.forward(carry, z_t, A, b, Q, H)
 
+        z_1 = MultivariateNormalFullCovariance(z.mean()[0], z.covariance()[0])
         q_1 = KalmanFilter.update(z_t_sub_1,
-                                  MultivariateNormalFullCovariance(z.mean()[0], z.covariance()[0]),
+                                  z_1,
                                   H)
         p_1 = z_t_sub_1
+        log_likelihood1 = z_1.multiply(p_1)[0]
         if z.mean().shape[0] > 1:
             _, result = jax.lax.scan(kf_forward, (q_1),
                                     MultivariateNormalFullCovariance(z.mean()[1:], z.covariance()[1:]))
-            q_dist, p_dist = result
+            q_dist, p_dist, log_likelihood = result
 
             q_dist = MultivariateNormalFullCovariance(
                 jnp.vstack((jnp.expand_dims(q_1.mean(), axis=0), q_dist.mean())),
@@ -31,15 +33,17 @@ class KalmanFilter:
                 jnp.vstack((jnp.expand_dims(p_1.covariance(), axis=0), p_dist.covariance())),
             )
 
-            return q_dist, p_dist
+            log_likelihood = jnp.append(jnp.array(log_likelihood1), log_likelihood)
+
+            return q_dist, p_dist, log_likelihood
         else:
             return MultivariateNormalFullCovariance(
                 jnp.expand_dims(q_1.mean(), axis=0),
                 jnp.expand_dims(q_1.covariance(), axis=0)
             ), MultivariateNormalFullCovariance(
                 jnp.expand_dims(p_1.mean(), axis=0),
-                jnp.expand_dims(p_1.covariance(), axis=0)
-            )
+                jnp.expand_dims(p_1.covariance(), axis=0),
+            ), jnp.array([log_likelihood1])
     
     @staticmethod
     def forward(carry, z_t, A, b, Q, H):
@@ -54,7 +58,9 @@ class KalmanFilter:
         # Update
         z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H)
 
-        return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1) # carry, (q_dist, p_dist)
+        # Log-Likelihood
+        log_likelihood = MultivariateNormalFullCovariance(H @ z_t_given_t_sub_1.mean(), z_t.covariance() + H @ z_t_given_t_sub_1.covariance() @ H.T).log_likelihood(z_t.mean())
+        return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist)
     
     @staticmethod
     def predict(z_t, A, b, Q):
