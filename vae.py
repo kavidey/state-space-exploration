@@ -47,7 +47,7 @@ latent_dims = 20
 checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
 checkpoint_path.mkdir(exist_ok=True, parents=True)
 
-dataset_path = Path("minst_dataset")
+dataset_path = Path("dataset/mnist")
 dataset_path.mkdir(exist_ok=True)
 
 options = ocp.CheckpointManagerOptions(max_to_keep=3, save_interval_steps=2)
