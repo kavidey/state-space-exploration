@@ -81,7 +81,6 @@ class Decoder(nnx.Module):
         z = self.linear2(z)
         return z
 
-
 class VAE(nnx.Module):
     def __init__(self, data_dim: int, latent_dim: int, rngs: nnx.Rngs):
         self.rngs = rngs

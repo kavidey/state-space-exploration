@@ -1,8 +1,3 @@
-# %% [markdown]
-# Note: data loading code is modified from the following sources
-# - https://uvadlc-notebooks.readthedocs.io/en/latest/tutorial_notebooks/JAX/tutorial4/Optimization_and_Initialization.html
-# - https://github.com/wandb/examples/blob/master/colabs/jax/Simple_Training_Loop_in_JAX_and_Flax.ipynb
-# - https://github.com/pytorch/examples/blob/main/vae/main.py
 # %%
 # Imports
 from pathlib import Path
@@ -17,11 +12,10 @@ from tqdm.auto import tqdm
 
 import jax
 import jax.numpy as jnp
-from jax import random
+from jax import nn
+from jax import random as jnr
 
-import flax
-from flax import linen as nn
-from flax.training import train_state, checkpoints
+from flax import nnx
 
 import optax
 
@@ -34,7 +28,7 @@ import orbax.checkpoint as ocp
 # %%
 model_name = "svae_vae.normal_prior.no_kl"
 
-key = random.PRNGKey(42)
+key = jnr.PRNGKey(42)
 
 batch_size = 64
 validation_split = 0.2
@@ -46,7 +40,7 @@ latent_dims = 2
 checkpoint_path = (Path("vae_checkpoints") / model_name).absolute()
 checkpoint_path.mkdir(exist_ok=True, parents=True)
 
-dataset_path = Path("minst_dataset")
+dataset_path = Path("dataset") / "mnist"
 dataset_path.mkdir(exist_ok=True)
 
 options = ocp.CheckpointManagerOptions(max_to_keep=3, save_interval_steps=2)
@@ -57,47 +51,51 @@ train_loader = DataLoader(
     train_dataset, batch_size=batch_size, shuffle=True, drop_last=True
 )
 
-
+test_dataset = MNIST(dataset_path, train=False, transform=T.ToTensor(), download=True)
+test_loader = DataLoader(
+    test_dataset, batch_size=batch_size, shuffle=True, drop_last=True
+)
 # %%
-class Encoder(nn.Module):
-    latent_dims: int
+class Encoder(nnx.Module):
+    def __init__(self, data_dim: int, latent_dim: int, rngs: nnx.Rngs):
+        self.linear1 = nnx.Linear(data_dim, 400, rngs=rngs)
+        self.linear_mu = nnx.Linear(400, latent_dim, rngs=rngs)
+        self.linear_logvar = nnx.Linear(400, latent_dim, rngs=rngs)
 
-    @nn.compact
     def __call__(self, x):
-        x = nn.Dense(400, name="enc_fc1")(x)
+        x = self.linear1(x)
         x = nn.relu(x)
-        xhat = nn.Dense(latent_dims, name="enc_fc2_xhat")(x)
+        mu = self.linear_mu(x)
         # learning logvar = log(sigma^2) ensures that sigma is positive and helps with learning small numbers
-        logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
-        return xhat, logvar
+        logvar = self.linear_logvar(x)
+        return mu, logvar
 
 
-class Decoder(nn.Module):
-    @nn.compact
+class Decoder(nnx.Module):
+    def __init__(self, data_dim: int, latent_dim: int, rngs: nnx.Rngs):
+        self.linear1 = nnx.Linear(latent_dim, 400, rngs=rngs)
+        self.linear2 = nnx.Linear(400, data_dim, rngs=rngs)
+
     def __call__(self, z):
-        z = nn.Dense(400, name="dec_fc1")(z)
+        z = self.linear1(z)
         z = nn.relu(z)
-        z = nn.Dense(784, name="dec_fc2")(z)
+        z = self.linear2(z)
         return z
 
+class VAE(nnx.Module):
+    def __init__(self, data_dim: int, latent_dim: int, rngs: nnx.Rngs):
+        self.rngs = rngs
+        self.encoder = Encoder(data_dim, latent_dim, rngs=rngs)
+        self.decoder = Decoder(data_dim, latent_dim, rngs=rngs)
 
-class VAE(nn.Module):
-    latent_dims: int
-
-    def setup(self):
-        self.encoder = Encoder(latent_dims=latent_dims, name="encoder")
-        self.decoder = Decoder(name="decoder")
-
-    @nn.compact
-    def __call__(self, x, z_rng):
+    def __call__(self, x):
         xhat, logvar = self.encoder(x)
-        # Convert logvar back to sigma and sample from learned distribution
         sigma_0 = jnp.exp(logvar * 0.5)
 
         # Calculate the posterior using bayes rule
         mu_star, sigma_star = self.posterior(xhat, sigma_0)
 
-        z = self.reparameterize(mu_star, sigma_star, z_rng)
+        z = self.reparameterize(mu_star, sigma_star)
         return self.decode(z), mu_star, sigma_star
     
     def posterior(self, xhat, sigma_0):
@@ -111,98 +109,95 @@ class VAE(nn.Module):
 
         return mu_star, sigma_star
 
-    def reparameterize(self, mu, sigma, rng):
-        eps = random.normal(rng, mu.shape)
+    def reparameterize(self, mu, sigma):
+        eps = jnr.normal(self.rngs.noise(), mu.shape)
         return eps * sigma + mu
 
     def decode(self, z):
         return self.decoder(z)
-
-
 # %%
-def create_train_step(key, model, optimizer):
-    params = model.init(
-        key, jnp.zeros((batch_size, 784)), jax.random.PRNGKey(0)
-    )  # dummy key just as example input
-    opt_state = optimizer.init(params)
+def loss_fn(model, x):
+    reduce_dims = list(range(1, len(x.shape)))
+    recon, mean, logvar = model(x)
+    mse_loss = optax.l2_loss(recon, x).sum(axis=reduce_dims).mean()
+    kl_loss = jnp.mean(
+        -0.5 * jnp.sum(1 + logvar - mean**2 - jnp.exp(logvar), axis=reduce_dims)
+    )  # KL loss term to keep encoder output close to standard normal distribution.
 
-    def loss_fn(params, x, key):
-        reduce_dims = list(range(1, len(x.shape)))
-        recon, mean, sigma = model.apply(params, x, key)
-        logvar = 2 * jnp.log(sigma)
-        mse_loss = optax.l2_loss(recon, x).sum(axis=reduce_dims).mean()
-        kl_loss = jnp.mean(
-            -0.5 * jnp.sum(1 + logvar - mean**2 - jnp.exp(logvar), axis=reduce_dims)
-        )  # KL loss term to keep encoder output close to standard normal distribution.
+    loss = mse_loss + kl_weight * kl_loss
+    return loss, (mse_loss, kl_loss)
 
-        loss = mse_loss + kl_weight * kl_loss
-        return loss, (mse_loss, kl_loss)
+@nnx.jit
+def train_step(model: VAE, optimizer: nnx.Optimizer, metrics: nnx.MultiMetric, batch):
+  """Train for a single step."""
+  grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
+  (loss, (mse_loss, kl_loss)), grads = grad_fn(model, batch)
+  metrics.update(loss=loss, mse_loss=mse_loss, kl_loss=kl_loss)
+  optimizer.update(grads)
 
-    @jax.jit
-    def train_step(params, opt_state, x, key):
-        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key)
-        loss, (mse_loss, kl_loss) = losses
-
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-
-        return params, opt_state, loss, mse_loss, kl_loss
-
-    return train_step, params, opt_state
-
-
-# %% Initialize the Model
-key, model_key = jax.random.split(key)
-
-model = VAE(latent_dims=latent_dims)
-optimizer = optax.adamw(learning_rate=1e-4)
-
-train_step, params, opt_state = create_train_step(model_key, model, optimizer)
+@nnx.jit
+def eval_step(model: VAE, metrics: nnx.MultiMetric, batch):
+  loss, (mse_loss, kl_loss) = loss_fn(model, batch)
+  metrics.update(loss=loss, mse_loss=mse_loss, kl_loss=kl_loss)
+# %%
+model = VAE(784, latent_dims, rngs=nnx.Rngs(0))
+optimizer = nnx.Optimizer(model, optax.adamw(learning_rate=1e-4))
+metrics = nnx.MultiMetric(
+    loss=nnx.metrics.Average('loss'),
+    mse_loss=nnx.metrics.Average('mse_loss'),
+    kl_loss=nnx.metrics.Average('kl_loss'),
+)
 # %% Train
-
-running_loss = []
+metrics_history = {
+  'train_loss': [],
+  'train_mse_loss': [],
+  'train_kl_loss': [],
+  'test_loss': [],
+  'test_mse_loss': [],
+  'test_kl_loss': [],
+}
 
 pbar = tqdm(range(epochs))
 for epoch in pbar:
-    total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
     for i, (batch, c) in enumerate(train_loader):
-        key, subkey = jax.random.split(key)
+        train_step(model, optimizer, metrics, batch.numpy().reshape(batch_size, 784))
 
-        batch = batch.numpy().reshape(batch_size, 784)
-        params, opt_state, loss, mse_loss, kl_loss = train_step(
-            params, opt_state, batch, subkey
-        )
+    # Log the training metrics.
+    for metric, value in metrics.compute().items():  # Compute the metrics.
+      metrics_history[f'train_{metric}'].append(value)  # Record the metrics.
+    metrics.reset()  # Reset the metrics for the test set.
 
-        total_loss += loss
-        total_mse += mse_loss
-        total_kl += kl_loss
+    # Compute the metrics on the test set after each training epoch.
+    for test_batch, c in test_loader:
+      eval_step(model, metrics, test_batch.numpy().reshape(batch_size, 784))
 
-        pbar.set_postfix_str(f"Loss: {total_loss/i:.2f}")
-    running_loss.append(total_loss/len(train_loader))
-    mngr.save(epoch, args=ocp.args.StandardSave(params))
-mngr.wait_until_finished()
+    # Log the test metrics.
+    for metric, value in metrics.compute().items():
+      metrics_history[f'test_{metric}'].append(value)
+    metrics.reset()  # Reset the metrics for the next training epoch.
+    pbar.set_postfix_str(f"Loss: {metrics_history['test_loss'][-1]:.2f}")
+    
+#     mngr.save(epoch, args=ocp.args.StandardSave(params))
+# mngr.wait_until_finished()
 # %% Training Metrics
-plt.plot(running_loss)
+plt.plot(metrics_history['test_loss'], label="loss")
+plt.plot(metrics_history['test_kl_loss'], label="kl loss")
+plt.plot(metrics_history['test_mse_loss'], label="mse loss")
+plt.legend()
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 # %% Sample
-restored_params = mngr.restore(mngr.latest_step(), params)
+# restored_params = mngr.restore(mngr.latest_step(), params)
+model.eval()
 
-def build_sample_fn(model, params):
-    def sample_fn(z: jnp.array) -> jnp.array:
-        return model.apply(params, z, method=model.decode)
-
-    return sample_fn
-
-
-sample_fn = build_sample_fn(model, restored_params)
+@nnx.jit
+def sample_fn(z: jnp.array):
+    return model.decode(z)
 
 num_samples = 100
 h = w = 15
 
-# key, z_key = jax.random.split(key)
-# z = jax.random.normal(z_key, (num_samples, latent_dims))
-latent_size = 2
+latent_size = 1
 ypts = jnp.linspace(-latent_size, latent_size, h)
 xpts = jnp.linspace(-latent_size, latent_size, w)
 z_ = jnp.meshgrid(xpts, ypts)
