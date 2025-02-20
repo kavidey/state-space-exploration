@@ -5,6 +5,8 @@
         "bijectors",
         "dset",
         "fori",
+        "lgssm",
+        "loglik",
         "mngr",
         "nans",
         "ndarray",

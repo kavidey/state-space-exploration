@@ -1,6 +1,7 @@
 # %%
 from typing import Tuple
 import matplotlib.pyplot as plt
+%config InlineBackend.figure_format = 'retina'
 
 import jax
 import jax.numpy as jnp
@@ -59,6 +60,10 @@ plt.show()
 lgssm_posterior = lgssm.filter(params, x)
 filtered_means = lgssm_posterior.filtered_means
 filtered_covs = lgssm_posterior.filtered_covariances
+
+predicted_means = jnp.vstack((jnp.expand_dims(initial_mean, axis=0), jax.vmap(lambda m: transition_matrix @ m)(lgssm_posterior.filtered_means[:-1])))
+predicted_covs = jnp.vstack((jnp.expand_dims(initial_covariance, axis=0), jax.vmap(lambda cov: (transition_matrix @ cov @ transition_matrix.T) + transition_noise)(lgssm_posterior.filtered_covariances[:-1])))
+
 print(lgssm_posterior.marginal_loglik)
 # %%
 lgssm_posterior = lgssm.smoother(params, x)
@@ -82,7 +87,10 @@ ax.plot(*x.T, ls="", **observation_marker_kwargs, color="tab:green", label="obse
 ax.plot(*z_[:, :2].T, ls="--", color="darkgrey", label="true state")
 
 ax.plot(filtered_means[:, 0], filtered_means[:, 1], color="tab:red", label="dynamax", linewidth=4)
-plot_uncertainty_ellipses(filtered_means, filtered_covs, ax, **{"edgecolor": "tab:red", "linewidth": 0.5})
+plot_uncertainty_ellipses(filtered_means, filtered_covs, ax, **{"edgecolor": "tab:red", "linewidth": 1})
+
+ax.plot(predicted_means[:, 0], predicted_means[:, 1], color="tab:red", linewidth=4)
+plot_uncertainty_ellipses(predicted_means, predicted_covs, ax, **{"edgecolor": "tab:red", "linewidth": 1})
 
 ax.plot(our_filtered_means[:, 0], our_filtered_means[:, 1], color="tab:blue", label="ours")
 plot_uncertainty_ellipses(our_filtered_means, our_filtered_covs, ax, **{"edgecolor": "tab:blue", "linewidth": 0.5})

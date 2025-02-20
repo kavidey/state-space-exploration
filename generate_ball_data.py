@@ -108,10 +108,8 @@ def bounce_n(T=128, n=2, r=None, m=None):
 
     return X, y
 
-
 def ar(x, y, z):
     return z / 2 + np.arange(x, y, z, dtype='float')
-
 
 def draw_image(X, res, r=None):
     T, n = shape(X)[0:2]
@@ -131,14 +129,12 @@ def draw_image(X, res, r=None):
         A[t][A[t] > 1] = 1
     return A
 
-
 def bounce_mat(res, n=2, T=128, r=None):
     if r is None:
         r = np.array([1.2] * n)
     x, y = bounce_n(T, n, r)
     A = draw_image(x, res, r)
     return A, y
-
 
 def bounce_vec(res, n=2, T=128, r=None, m=None):
     if r is None:
