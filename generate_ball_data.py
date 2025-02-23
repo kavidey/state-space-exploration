@@ -158,8 +158,8 @@ dataset_dir.mkdir(parents=True, exist_ok=True)
 np.random.seed(42)
 
 res = 32
-T = 100
-N = 1000
+T = 50
+N = 10000
 # %%
 dat = np.empty((N, T, res, res, 3), dtype=float)
 dat_y = np.empty((N, T, 3, 4), dtype=float)
