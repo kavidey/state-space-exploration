@@ -76,3 +76,21 @@ class MultivariateNormalFullCovariance:
 jax.tree_util.register_pytree_node(MultivariateNormalFullCovariance,
                                MultivariateNormalFullCovariance._tree_flatten,
                                MultivariateNormalFullCovariance._tree_unflatten)
+
+def kl_divergence(
+    q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
+):
+    mu_0 = q.mean()
+    sigma_0 = q.covariance()
+
+    mu_1 = p.mean()
+    sigma_1 = p.covariance()
+
+    k = mu_0.shape[-1]
+
+    # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
+    a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
+    mean_diff = mu_1 - mu_0
+    b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
+    c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
+    return 0.5 * (a + b - k + c)
