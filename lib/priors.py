@@ -2,8 +2,7 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 
-from lib.distributions import MultivariateNormalFullCovariance
-
+from lib.distributions import MVN_log_likelihood, MVN_multiply
 class KalmanFilter:
     @staticmethod
     def run_forward(z, z_t_sub_1, A, b, Q, H):
@@ -12,37 +11,36 @@ class KalmanFilter:
         """
         kf_forward = lambda carry, z_t: KalmanFilter.forward(carry, z_t, A, b, Q, H)
 
-        z_1 = MultivariateNormalFullCovariance(z.mean()[0], z.covariance()[0])
+        z_1 = (z[0][0], z[1][0])
         q_1 = KalmanFilter.update(z_t_sub_1,
                                   z_1,
                                   H)
         p_1 = z_t_sub_1
-        log_likelihood1 = z_1.multiply(p_1)[0]
-        if z.mean().shape[0] > 1:
-            _, result = jax.lax.scan(kf_forward, (q_1),
-                                    MultivariateNormalFullCovariance(z.mean()[1:], z.covariance()[1:]))
+        log_likelihood1 = MVN_multiply(z_1[0], z_1[1], p_1[0], p_1[1])[0]
+        if z[0].shape[0] > 1:
+            _, result = jax.lax.scan(kf_forward, (q_1), (z[0][1:], z[1][1:]))
             q_dist, p_dist, log_likelihood = result
 
-            q_dist = MultivariateNormalFullCovariance(
-                jnp.vstack((jnp.expand_dims(q_1.mean(), axis=0), q_dist.mean())),
-                jnp.vstack((jnp.expand_dims(q_1.covariance(), axis=0), q_dist.covariance())),
+            q_dist = (
+                jnp.vstack((jnp.expand_dims(q_1[0], axis=0), q_dist[0])),
+                jnp.vstack((jnp.expand_dims(q_1[1], axis=0), q_dist[1])),
             )
 
-            p_dist = MultivariateNormalFullCovariance(
-                jnp.vstack((jnp.expand_dims(p_1.mean(), axis=0), p_dist.mean())),
-                jnp.vstack((jnp.expand_dims(p_1.covariance(), axis=0), p_dist.covariance())),
+            p_dist = (
+                jnp.vstack((jnp.expand_dims(p_1[0], axis=0), p_dist[0])),
+                jnp.vstack((jnp.expand_dims(p_1[1], axis=0), p_dist[1])),
             )
 
             log_likelihood = jnp.append(jnp.array(log_likelihood1), log_likelihood)
 
             return q_dist, p_dist, log_likelihood
         else:
-            return MultivariateNormalFullCovariance(
-                jnp.expand_dims(q_1.mean(), axis=0),
-                jnp.expand_dims(q_1.covariance(), axis=0)
-            ), MultivariateNormalFullCovariance(
-                jnp.expand_dims(p_1.mean(), axis=0),
-                jnp.expand_dims(p_1.covariance(), axis=0),
+            return (
+                jnp.expand_dims(q_1[0], axis=0),
+                jnp.expand_dims(q_1[1], axis=0)
+            ), (
+                jnp.expand_dims(p_1[0], axis=0),
+                jnp.expand_dims(p_1[1], axis=0),
             ), jnp.array([log_likelihood1])
     
     @staticmethod
@@ -59,8 +57,12 @@ class KalmanFilter:
         z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H)
 
         # Log-Likelihood
-        log_likelihood = MultivariateNormalFullCovariance(H @ z_t_given_t_sub_1.mean(), z_t.covariance() + H @ z_t_given_t_sub_1.covariance() @ H.T).log_likelihood(z_t.mean())
-        return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist)
+        log_likelihood = MVN_log_likelihood(
+            H @ z_t_given_t_sub_1[0],
+            z_t[1] + H @ z_t_given_t_sub_1[1] @ H.T,
+            z_t[0]
+        )
+        return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
     
     @staticmethod
     def predict(z_t, A, b, Q):
@@ -68,16 +70,16 @@ class KalmanFilter:
         P(z_t+1 | x_t, ..., x_1) = P(z_t+1 | z_t)
         """
         # z_t|t-1 = A @ z_t-1|t-1 + b
-        mu = A @ z_t.mean() + b
+        mu = A @ z_t[0] + b
 
         # P_t|t-1 = A @ P_t-1|t-1 @ A^T + Q
-        sigma = A @ z_t.covariance() @ A.T + Q
+        sigma = A @ z_t[1] @ A.T + Q
 
-        return MultivariateNormalFullCovariance(mu, sigma)
+        return (mu, sigma)
 
     @staticmethod
     def update(
-        z_t_given_t_sub_1: MultivariateNormalFullCovariance, x_t: jnp.array, H: jnp.array
+        z_t_given_t_sub_1: Tuple[jnp.array, jnp.array], x_t: jnp.array, H: jnp.array
     ):
         """
         Kalman filter update step
@@ -92,56 +94,56 @@ class KalmanFilter:
         """
 
         # hat_x_t = H @ z_t|t-1
-        hat_x_t = H @ z_t_given_t_sub_1.mean()
+        hat_x_t = H @ z_t_given_t_sub_1[0]
 
         # S_t = H @ P_t|t-1 @ H^T + R
-        S_t = H @ z_t_given_t_sub_1.covariance() @ H.T + x_t.covariance()
+        S_t = H @ z_t_given_t_sub_1[1] @ H.T + x_t[1]
         # K_t = P_t|t-1 @ H^T @ S^-1
-        K_t = z_t_given_t_sub_1.covariance() @ H.T @ jnp.linalg.inv(S_t)
+        K_t = z_t_given_t_sub_1[1] @ H.T @ jnp.linalg.inv(S_t)
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
-        mu = z_t_given_t_sub_1.mean() + K_t @ (x_t.mean() - hat_x_t)
+        mu = z_t_given_t_sub_1[0] + K_t @ (x_t[0] - hat_x_t)
 
         # P_t|t = P_t|t-1 - K_t @ S @ K_t^T
-        sigma = z_t_given_t_sub_1.covariance() - K_t @ S_t @ K_t.T
+        sigma = z_t_given_t_sub_1[1] - K_t @ S_t @ K_t.T
 
-        return MultivariateNormalFullCovariance(mu, sigma)
+        return (mu, sigma)
     
     @staticmethod
-    def run_backward(p_dist, A, b, Q, H) -> MultivariateNormalFullCovariance:
+    def run_backward(p_dist, A, b, Q, H) -> Tuple[jnp.array, jnp.array]:
         """
         Run Kalman Filter backward pass on a sequence of distributions and return results
         """
         kf_backward = lambda carry, z_t: KalmanFilter.backward(carry, z_t, A, b, Q, H)
         
-        q_dist_T = MultivariateNormalFullCovariance(p_dist.mean()[-1], p_dist.covariance()[-1])
-        q_dist_1_to_T_sub_1 = MultivariateNormalFullCovariance(p_dist.mean()[:-1], p_dist.covariance()[:-1])
+        q_dist_T = (p_dist[0][-1], p_dist[1][-1])
+        q_dist_1_to_T_sub_1 = (p_dist[0][:-1], p_dist[1][:-1])
         _, q_dist = jax.lax.scan(kf_backward, (q_dist_T), q_dist_1_to_T_sub_1, reverse=True)
 
-        q_dist = MultivariateNormalFullCovariance(
-            jnp.vstack((q_dist.mean(), jnp.expand_dims(q_dist_T.mean(), 0))),
-            jnp.vstack((q_dist.covariance(), jnp.expand_dims(q_dist_T.covariance(), 0)))
+        q_dist = (
+            jnp.vstack((q_dist[0], jnp.expand_dims(q_dist_T[0], 0))),
+            jnp.vstack((q_dist[1], jnp.expand_dims(q_dist_T[1], 0)))
         )
 
         return q_dist
     
     @staticmethod
-    def backward(carry, z_t: MultivariateNormalFullCovariance, A, b, Q, H):
+    def backward(carry, z_t: Tuple[jnp.array, jnp.array], A, b, Q, H):
         z_t_plus_1 = carry
 
         # A @ P_t @ A^T + Q
-        P_pred = A @ z_t.covariance() @ A.T + Q
+        P_pred = A @ z_t[1] @ A.T + Q
 
         # Kalman Gain
         # P_t @ A^T @ P_pred^-1
-        K = z_t.covariance() @ A.T @ jnp.linalg.inv(P_pred)
+        K = z_t[1] @ A.T @ jnp.linalg.inv(P_pred)
 
         # mu_t|T = mu_t|1:t + K @ (mu_t+1|T - A @ mu_i|1:t)
-        mu = z_t.mean() + K @ (z_t_plus_1.mean() - (A @ z_t.mean() + b)) # TODO: CHECK THE +b HERE
+        mu = z_t[0] + K @ (z_t_plus_1[0] - (A @ z_t[0] + b))
 
         # P_t|T = P_t|1:t + K @ (P_t+1|T - P_t+1|1:t) @ K^T
-        sigma = z_t.covariance() + K @ (z_t_plus_1.covariance() - P_pred) @ K.T
+        sigma = z_t[1] + K @ (z_t_plus_1[1] - P_pred) @ K.T
 
-        z_t_given_T = MultivariateNormalFullCovariance(mu, sigma)
+        z_t_given_T = (mu, sigma)
 
         return (z_t_given_T), (z_t_given_T) # carry, (posterior_dist)

@@ -25,7 +25,7 @@ tfd = tfp.distributions
 tfb = tfp.bijectors
 # tfpk = tfp.math.psd_kernels
 
-from lib.distributions import MultivariateNormalFullCovariance, MVN_kl_divergence
+from lib.distributions import MVN_kl_divergence
 from lib.priors import KalmanFilter
 
 jax.config.update("jax_debug_nans", True)
@@ -138,7 +138,7 @@ class Encoder(nn.Module):
         logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
         sigma = jnp.exp(logvar * 0.5)
 
-        return MultivariateNormalFullCovariance(xhat, jax.vmap(jnp.diag)(sigma))
+        return xhat, jax.vmap(jnp.diag)(sigma)
 
 
 class Decoder(nn.Module):
@@ -155,7 +155,7 @@ class VAE(nn.Module):
     @nn.compact
     def __call__(self, x, z_rng):
         z = Encoder(latent_dims=self.latent_dims, name="encoder")(x)
-        z_sample = z.sample(z_rng)
+        z_sample = jnr.multivariate_normal(z_rng, z[0], z[1])
         x_recon = Decoder(name="decoder")(z_sample)
 
         return x_recon, z
@@ -186,13 +186,13 @@ class SVAE_LDS(nn.Module):
     def __call__(self, x, z_rng):
         z_hat = self.encoder(x)
 
-        z_t_sub_1 = MultivariateNormalFullCovariance(
+        z_t_sub_1 = (
             jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
         )
 
         f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
         q_dist = KalmanFilter.run_backward(f_dist, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
-        z_recon = q_dist.sample(z_rng)
+        z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)
 
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
@@ -220,8 +220,8 @@ def create_train_step_warmup(
 
         def unbatched_loss(x, recon, q_dist):
             mse_loss = optax.l2_loss(recon, x)
-            k = q_dist.mean().shape[1]
-            kl_loss = jax.vmap(lambda q_dist: MVN_kl_divergence(q_dist.mean(), q_dist.covariance(), jnp.zeros((k)), jnp.eye(k)))(q_dist)
+            k = q_dist[0].shape[1]
+            kl_loss = jax.vmap(lambda q_dist: MVN_kl_divergence(q_dist[0], q_dist[1], jnp.zeros((k)), jnp.eye(k)))(q_dist)
 
             return mse_loss, kl_loss
         
@@ -292,7 +292,7 @@ ax[0].set_title('Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Each Dimension of the Latent Variable')
 
 plt.show()
@@ -311,12 +311,12 @@ def create_train_step(
         def unbatched_loss(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik):
             mse_loss = optax.l2_loss(recon, x)
             
-            def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: MultivariateNormalFullCovariance, p_z: MultivariateNormalFullCovariance):
-                k = z_hat.mean().shape[-1]
+            def observation_likelihood(z_hat, q_z, p_z):
+                k = z_hat[0].shape[-1]
                 # -1/2 ( k*log(2pi) + log(det(Sigma_i)) + (x_i - mu_i)^T @ Sigma_i^-1 @ (x_i - mu_i) + tr(P_i Sigma_i^-1) )
-                mean_diff = z_hat.mean() - q_z.mean()
-                inv_cov = jnp.linalg.inv(z_hat.covariance())
-                return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
+                mean_diff = z_hat[0] - q_z[0]
+                inv_cov = jnp.linalg.inv(z_hat[1])
+                return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat[1])) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z[1] @ inv_cov))
             
             kl_loss = jax.vmap(observation_likelihood)(z_hat, q_dist, p_dist) - marginal_loglik
             
@@ -434,10 +434,10 @@ ax[0].set_title('Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist.covariance()[i]))
+ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
 ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 plt.show()
@@ -455,10 +455,10 @@ ax[0].set_title('Masked Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist.covariance()[i]))
+ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
 ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 ax[4].plot(z_recon[i])
