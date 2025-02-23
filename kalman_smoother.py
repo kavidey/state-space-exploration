@@ -25,7 +25,7 @@ tfd = tfp.distributions
 tfb = tfp.bijectors
 # tfpk = tfp.math.psd_kernels
 
-from lib.distributions import MultivariateNormalFullCovariance
+from lib.distributions import MultivariateNormalFullCovariance, MVN_kl_divergence
 from lib.priors import KalmanFilter
 
 jax.config.update("jax_debug_nans", True)
@@ -206,23 +206,6 @@ Batched_SVAE_LDS = nn.vmap(SVAE_LDS,
     split_rngs={'params': False}
 )
 # %% VAE Train Code
-def kl_divergence(
-    q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
-):
-    mu_0 = q.mean()
-    sigma_0 = q.covariance()
-
-    mu_1 = p.mean()
-    sigma_1 = p.covariance()
-
-    k = mu_0.shape[-1]
-
-    # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
-    a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
-    mean_diff = mu_1 - mu_0
-    b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
-    c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
-    return 0.5 * (a + b - k + c)
 
 def create_train_step_warmup(
             key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
@@ -238,7 +221,7 @@ def create_train_step_warmup(
         def unbatched_loss(x, recon, q_dist):
             mse_loss = optax.l2_loss(recon, x)
             k = q_dist.mean().shape[1]
-            kl_loss = jax.vmap(lambda q_dist: kl_divergence(q_dist, MultivariateNormalFullCovariance(jnp.zeros((k)), jnp.eye(k))))(q_dist)
+            kl_loss = jax.vmap(lambda q_dist: MVN_kl_divergence(q_dist.mean(), q_dist.covariance(), jnp.zeros((k)), jnp.eye(k)))(q_dist)
 
             return mse_loss, kl_loss
         
