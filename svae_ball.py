@@ -25,26 +25,28 @@ tfd = tfp.distributions
 tfb = tfp.bijectors
 # tfpk = tfp.math.psd_kernels
 
-from lib.distributions import MultivariateNormalFullCovariance
+from lib.distributions import MVN_kl_divergence
 from lib.priors import KalmanFilter
 
 jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
+jax.config.update('jax_platform_name', 'cpu')
 # %%
 key = jnr.PRNGKey(42)
 
 warmup_epochs = 125
-warmup_kl_weight = 0.1
+warmup_kl_weight = 0.01
 
 epochs = 500
-batch_size = 64
-latent_dims = 6
+batch_size = 32
+latent_dims = 4
 
-kl_weight = 0.5
+kl_weight = 0.05
+kl_ramp = 30 # The epoch where the KL weight reaches its final value
 
 A_init_epsilon = 0.01
 Q_init_stdev = 0.02
-model_name = f"svae_lds.ptr_{warmup_epochs}_{warmup_kl_weight}.klw_{kl_weight:.2f}.ep_{epochs}"
+model_name = f"svae_lds.ptr_{warmup_epochs}_{warmup_kl_weight}.klw_{kl_weight:.2f}.klr_{kl_ramp}.ep_{epochs}"
 
 checkpoint_path = (Path("vae_checkpoints") / f"{model_name}_{time.strftime('%Y%m%d-%H%M%S')}").absolute()
 checkpoint_path.mkdir(parents=True)
@@ -56,13 +58,49 @@ torch.manual_seed(47)
 dataset_dir = Path("dataset") / "billiard"
 train_dset = jnp.load(dataset_dir/"train.npz")
 test_dset = jnp.load(dataset_dir/"test.npz")
+# %%
+def get_embedding(pos, embedding_dim, n=1000):
+    return jnp.sin(pos/n**(2*np.arange(embedding_dim)/embedding_dim))
+get_embedding_b = jax.vmap(get_embedding, (0, None, None))
 
-train_dataloader = torch.utils.data.DataLoader(
-    torch.reshape(torch.tensor(train_dset['y'][...,:2]), train_dset['y'].shape[:2]+(6,)),
-    batch_size=batch_size)
-test_dataloader = torch.utils.data.DataLoader(
-    torch.reshape(torch.tensor(test_dset['y'][...,:2]), test_dset['y'].shape[:2]+(6,)),
-    batch_size=batch_size)
+for i in jnp.linspace(-10, 10, 20):
+    plt.plot(get_embedding(i, 10, n=4))
+# %%
+dset_len = 1024
+embedding_dim = 10
+
+train = []
+test = []
+for i in range(dset_len):
+    positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
+    position_vec = jnp.hstack((
+        get_embedding_b(positions[:,0], embedding_dim, 4),
+        get_embedding_b(positions[:,1], embedding_dim, 4),
+        get_embedding_b(positions[:,2], embedding_dim, 4),
+        get_embedding_b(positions[:,3], embedding_dim, 4),
+        get_embedding_b(positions[:,4], embedding_dim, 4),
+        get_embedding_b(positions[:,5], 10, 4),
+        (positions - 5) / embedding_dim
+    ))
+    train.append(np.asarray(position_vec))
+train = np.array(train)
+
+for i in range(100):
+    positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
+    position_vec = jnp.hstack((
+        get_embedding_b(positions[:,0], embedding_dim, 4),
+        get_embedding_b(positions[:,1], embedding_dim, 4),
+        get_embedding_b(positions[:,2], embedding_dim, 4),
+        get_embedding_b(positions[:,3], embedding_dim, 4),
+        get_embedding_b(positions[:,4], embedding_dim, 4),
+        get_embedding_b(positions[:,5], embedding_dim, 4),
+        (positions - 5) / 10
+    ))
+    test.append(np.asarray(position_vec))
+test = np.array(test)
+# %%
+train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size)
+test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size)
 
 process_batch = jnp.array
 setup_batch = process_batch(next(iter(train_dataloader)))
@@ -96,22 +134,22 @@ class Encoder(nn.Module):
 
     @nn.compact
     def __call__(self, x: jnp.array):
-        # x = nn.Dense(6, name="enc_fc1")(x)
-        # x = nn.relu(x)
+        x = nn.Dense(20, name="enc_fc1")(x)
+        x = nn.relu(x)
         xhat = nn.Dense(latent_dims, name="enc_fc2_xhat")(x)
 
         # learning logvar = log(sigma^2) ensures that sigma is positive and helps with learning small numbers
         logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
         sigma = jnp.exp(logvar * 0.5)
 
-        return MultivariateNormalFullCovariance(xhat, jax.vmap(jnp.diag)(sigma))
+        return xhat, jax.vmap(jnp.diag)(sigma)
 
 
 class Decoder(nn.Module):
     @nn.compact
     def __call__(self, z):
-        # z = nn.Dense(6, name="dec_fc1")(z)
-        # z = nn.relu(z)
+        z = nn.Dense(10, name="dec_fc1")(z)
+        z = nn.relu(z)
         z = nn.Dense(6, name="dec_fc2")(z)
         return z
 
@@ -121,7 +159,7 @@ class VAE(nn.Module):
     @nn.compact
     def __call__(self, x, z_rng):
         z = Encoder(latent_dims=self.latent_dims, name="encoder")(x)
-        z_sample = z.sample(z_rng)
+        z_sample = jnr.multivariate_normal(z_rng, z[0], z[1])
         x_recon = Decoder(name="decoder")(z_sample)
 
         return x_recon, z
@@ -152,13 +190,13 @@ class SVAE_LDS(nn.Module):
     def __call__(self, x, z_rng):
         z_hat = self.encoder(x)
 
-        z_t_sub_1 = MultivariateNormalFullCovariance(
+        z_t_sub_1 = (
             jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
         )
 
         f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
         q_dist = KalmanFilter.run_backward(f_dist, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
-        z_recon = q_dist.sample(z_rng)
+        z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)
 
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
@@ -172,39 +210,22 @@ Batched_SVAE_LDS = nn.vmap(SVAE_LDS,
     split_rngs={'params': False}
 )
 # %% VAE Train Code
-def kl_divergence(
-    q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
-):
-    mu_0 = q.mean()
-    sigma_0 = q.covariance()
-
-    mu_1 = p.mean()
-    sigma_1 = p.covariance()
-
-    k = mu_0.shape[-1]
-
-    # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
-    a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
-    mean_diff = mu_1 - mu_0
-    b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
-    c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
-    return 0.5 * (a + b - k + c)
 
 def create_train_step_warmup(
             key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch, jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
+    params = model.init(key, setup_batch[..., :6*embedding_dim], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
     def loss_fn(params, x, key, kl_weight):
         bs = x.shape[0]
 
-        recon, q_dist = model.apply(params, x, jnr.split(key, x.shape[0]))
+        recon, q_dist = model.apply(params, x[...,:6*embedding_dim], jnr.split(key, x.shape[0]))
 
         def unbatched_loss(x, recon, q_dist):
-            mse_loss = optax.l2_loss(recon, x)
-            k = q_dist.mean().shape[1]
-            kl_loss = jax.vmap(lambda q_dist: kl_divergence(q_dist, MultivariateNormalFullCovariance(jnp.zeros((k)), jnp.eye(k))))(q_dist)
+            mse_loss = optax.l2_loss(recon, x[...,-6:])
+            k = q_dist[0].shape[1]
+            kl_loss = jax.vmap(lambda q_dist: MVN_kl_divergence(q_dist[0], q_dist[1], jnp.zeros((k)), jnp.eye(k)))(q_dist)
 
             return mse_loss, kl_loss
         
@@ -257,7 +278,7 @@ restored_warmup_params = mngr.restore(mngr.latest_step(), warmup_params)
 def create_pred_step(model: nn.Module, params):
     @jax.jit
     def pred_step(x, key):
-        recon, q_dist = model.apply(params, x, jnr.split(key, x.shape[0]))
+        recon, q_dist = model.apply(params, x[..., :6*embedding_dim], jnr.split(key, x.shape[0]))
         return recon, q_dist
     
     return pred_step
@@ -275,14 +296,14 @@ ax[0].set_title('Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Each Dimension of the Latent Variable')
 
 plt.show()
 # %%
-plt.plot(sample_batch[i,:,0], sample_batch[i,:,1], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,2], sample_batch[i,:,3], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,4], sample_batch[i,:,5], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+0], sample_batch[i,:,6*embedding_dim+1], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+2], sample_batch[i,:,6*embedding_dim+3], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+4], sample_batch[i,:,6*embedding_dim+5], c='black', linewidth=2)
 
 plt.plot(recon[i,:,0], recon[i,:,1])
 plt.plot(recon[i,:,2], recon[i,:,3])
@@ -291,23 +312,23 @@ plt.plot(recon[i,:,4], recon[i,:,5])
 def create_train_step(
     key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch, jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
+    params = model.init(key, setup_batch[..., :6*embedding_dim], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
     def loss_fn(params, x, key, kl_weight):
         bs = x.shape[0]
 
-        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, jnr.split(key, x.shape[0]))
+        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :6*embedding_dim], jnr.split(key, x.shape[0]))
 
         def unbatched_loss(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik):
-            mse_loss = optax.l2_loss(recon, x)
+            mse_loss = optax.l2_loss(recon, x[..., -6:])
             
-            def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: MultivariateNormalFullCovariance, p_z: MultivariateNormalFullCovariance):
-                k = z_hat.mean().shape[-1]
+            def observation_likelihood(z_hat, q_z, p_z):
+                k = z_hat[0].shape[-1]
                 # -1/2 ( k*log(2pi) + log(det(Sigma_i)) + (x_i - mu_i)^T @ Sigma_i^-1 @ (x_i - mu_i) + tr(P_i Sigma_i^-1) )
-                mean_diff = z_hat.mean() - q_z.mean()
-                inv_cov = jnp.linalg.inv(z_hat.covariance())
-                return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
+                mean_diff = z_hat[0] - q_z[0]
+                inv_cov = jnp.linalg.inv(z_hat[1])
+                return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat[1])) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z[1] @ inv_cov))
             
             kl_loss = jax.vmap(observation_likelihood)(z_hat, q_dist, p_dist) - marginal_loglik
             
@@ -354,7 +375,7 @@ running_loss = []
 running_mse = []
 running_kl = []
 
-pbar = tqdm(range(epochs))
+pbar = tqdm(range(epochs + kl_ramp))
 for epoch in pbar:
     total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
     for i, batch in enumerate(train_dataloader):
@@ -362,7 +383,7 @@ for epoch in pbar:
 
         batch = process_batch(batch)
         params1, opt_state, loss, mse_loss, kl_loss = train_step(
-            params, opt_state, batch, subkey, kl_weight
+            params, opt_state, batch, subkey, min(epoch / kl_ramp, 1) * kl_weight
         )
 
         contains_nan = False
@@ -414,7 +435,7 @@ print("A", restored_params["params"]["kf_A"])
 print("b", restored_params["params"]["kf_b"])
 print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %% LDS Reconstruction
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch, key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :60], key)
 f, ax = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
 i = 0
@@ -425,17 +446,17 @@ ax[0].set_title('Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist.covariance()[i]))
+ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
 ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 plt.show()
 # %%
-plt.plot(sample_batch[i,:,0], sample_batch[i,:,1], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,2], sample_batch[i,:,3], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,4], sample_batch[i,:,5], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+0], sample_batch[i,:,6*embedding_dim+1], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+2], sample_batch[i,:,6*embedding_dim+3], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+4], sample_batch[i,:,6*embedding_dim+5], c='black', linewidth=2)
 
 plt.plot(recon[i,:,0], recon[i,:,1])
 plt.plot(recon[i,:,2], recon[i,:,3])
@@ -454,14 +475,22 @@ ax[0].set_title('Masked Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist.covariance()[i]))
+ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
 ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 ax[4].plot(z_recon[i])
 ax[4].set_title('Latent Posterior Samples')
 
 plt.show()
+# %%
+plt.plot(sample_batch[i,:,0], sample_batch[i,:,1], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,2], sample_batch[i,:,3], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,4], sample_batch[i,:,5], c='black', linewidth=2)
+
+plt.plot(recon[i,:,0], recon[i,:,1])
+plt.plot(recon[i,:,2], recon[i,:,3])
+plt.plot(recon[i,:,4], recon[i,:,5])
 # %%
