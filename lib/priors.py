@@ -99,7 +99,8 @@ class KalmanFilter:
         # S_t = H @ P_t|t-1 @ H^T + R
         S_t = H @ z_t_given_t_sub_1[1] @ H.T + x_t[1]
         # K_t = P_t|t-1 @ H^T @ S^-1
-        K_t = z_t_given_t_sub_1[1] @ H.T @ jnp.linalg.inv(S_t)
+        # K_t = z_t_given_t_sub_1[1] @ H.T @ jnp.linalg.inv(S_t)
+        K_t = z_t_given_t_sub_1[1] @ (jnp.linalg.solve(S_t.T, H)).T # (AB^-1)^T = (B^-1)^T A^T = (B^T)^-1 A^T
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
         mu = z_t_given_t_sub_1[0] + K_t @ (x_t[0] - hat_x_t)
@@ -136,7 +137,8 @@ class KalmanFilter:
 
         # Kalman Gain
         # P_t @ A^T @ P_pred^-1
-        K = z_t[1] @ A.T @ jnp.linalg.inv(P_pred)
+        # K = z_t[1] @ A.T @ jnp.linalg.inv(P_pred)
+        K = z_t[1] @ (jnp.linalg.solve(P_pred.T, A)).T # (AB^-1)^T = (B^-1)^T A^T = (B^T)^-1 A^T
 
         # mu_t|T = mu_t|1:t + K @ (mu_t+1|T - A @ mu_i|1:t)
         mu = z_t[0] + K @ (z_t_plus_1[0] - (A @ z_t[0] + b))

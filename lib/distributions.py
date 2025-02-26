@@ -74,7 +74,8 @@ def MVN_multiply(m1, c1, m2, c2):
     k = m1.shape[-1]
     mean_diff = m1 - m2
     cov = c1 + c2
-    c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
+    # c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
+    c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.solve(cov, mean_diff))
 
     s_cov_inv = jnp.linalg.inv(c1)
     o_cov_inv = jnp.linalg.inv(c2)
@@ -87,7 +88,8 @@ def MVN_multiply(m1, c1, m2, c2):
 def MVN_log_likelihood(mean, cov, x):
     k = mean.shape[-1]
     mean_diff = mean - x
-    log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
+    # log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
+    log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.solve(cov, mean_diff))
     return log_likelihood
 
 def MVN_kl_divergence(mu_0, sigma_0, mu_1, sigma_1):
@@ -96,6 +98,7 @@ def MVN_kl_divergence(mu_0, sigma_0, mu_1, sigma_1):
     # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
     a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
     mean_diff = mu_1 - mu_0
-    b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
+    # b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
+    b = mean_diff.T @ jnp.linalg.solve(sigma_1, mean_diff)
     c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
     return 0.5 * (a + b - k + c)
