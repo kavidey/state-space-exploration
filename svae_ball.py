@@ -39,7 +39,7 @@ warmup_kl_weight = 0.01
 
 epochs = 500
 batch_size = 32
-latent_dims = 4
+latent_dims = 18
 
 kl_weight = 0.05
 kl_ramp = 30 # The epoch where the KL weight reaches its final value
@@ -69,36 +69,42 @@ for i in jnp.linspace(-10, 10, 20):
 dset_len = 1024
 embedding_dim = 10
 
-train = []
-test = []
-for i in range(dset_len):
-    positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
-    position_vec = jnp.hstack((
-        get_embedding_b(positions[:,0], embedding_dim, 4),
-        get_embedding_b(positions[:,1], embedding_dim, 4),
-        get_embedding_b(positions[:,2], embedding_dim, 4),
-        get_embedding_b(positions[:,3], embedding_dim, 4),
-        get_embedding_b(positions[:,4], embedding_dim, 4),
-        get_embedding_b(positions[:,5], 10, 4),
-        (positions - 5) / embedding_dim
-    ))
-    train.append(np.asarray(position_vec))
-train = np.array(train)
+# train = []
+# test = []
+# for i in range(dset_len):
+#     positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
+#     position_vec = jnp.hstack((
+#         get_embedding_b(positions[:,0], embedding_dim, 4),
+#         get_embedding_b(positions[:,1], embedding_dim, 4),
+#         get_embedding_b(positions[:,2], embedding_dim, 4),
+#         get_embedding_b(positions[:,3], embedding_dim, 4),
+#         get_embedding_b(positions[:,4], embedding_dim, 4),
+#         get_embedding_b(positions[:,5], 10, 4),
+#         (positions - 5)
+#     ))
+#     train.append(np.asarray(position_vec))
+# train = np.array(train)
 
-for i in range(100):
-    positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
-    position_vec = jnp.hstack((
-        get_embedding_b(positions[:,0], embedding_dim, 4),
-        get_embedding_b(positions[:,1], embedding_dim, 4),
-        get_embedding_b(positions[:,2], embedding_dim, 4),
-        get_embedding_b(positions[:,3], embedding_dim, 4),
-        get_embedding_b(positions[:,4], embedding_dim, 4),
-        get_embedding_b(positions[:,5], embedding_dim, 4),
-        (positions - 5) / 10
-    ))
-    test.append(np.asarray(position_vec))
-test = np.array(test)
+# for i in range(100):
+#     positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
+#     position_vec = jnp.hstack((
+#         get_embedding_b(positions[:,0], embedding_dim, 4),
+#         get_embedding_b(positions[:,1], embedding_dim, 4),
+#         get_embedding_b(positions[:,2], embedding_dim, 4),
+#         get_embedding_b(positions[:,3], embedding_dim, 4),
+#         get_embedding_b(positions[:,4], embedding_dim, 4),
+#         get_embedding_b(positions[:,5], embedding_dim, 4),
+#         (positions - 5)
+#     ))
+#     test.append(np.asarray(position_vec))
+# test = np.array(test)
+
+# np.savez(dataset_dir / "train_embedding.npz", train)
+# np.savez(dataset_dir / "test_embedding.npz", test)
 # %%
+train = np.load(dataset_dir/"train_embedding.npz")['arr_0']
+test = np.load(dataset_dir/"test_embedding.npz")['arr_0']
+
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size)
 
@@ -148,8 +154,8 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     @nn.compact
     def __call__(self, z):
-        z = nn.Dense(10, name="dec_fc1")(z)
-        z = nn.relu(z)
+        # z = nn.Dense(10, name="dec_fc1")(z)
+        # z = nn.relu(z)
         z = nn.Dense(6, name="dec_fc2")(z)
         return z
 
@@ -463,7 +469,7 @@ plt.plot(recon[i,:,2], recon[i,:,3])
 plt.plot(recon[i,:,4], recon[i,:,5])
 # %% LDS Imputation
 masked_batch = sample_batch.at[:,10:40].set(0)
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(masked_batch, key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(masked_batch[..., :60], key)
 
 f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
@@ -486,9 +492,9 @@ ax[4].set_title('Latent Posterior Samples')
 
 plt.show()
 # %%
-plt.plot(sample_batch[i,:,0], sample_batch[i,:,1], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,2], sample_batch[i,:,3], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,4], sample_batch[i,:,5], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+0], sample_batch[i,:,6*embedding_dim+1], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+2], sample_batch[i,:,6*embedding_dim+3], c='black', linewidth=2)
+plt.plot(sample_batch[i,:,6*embedding_dim+4], sample_batch[i,:,6*embedding_dim+5], c='black', linewidth=2)
 
 plt.plot(recon[i,:,0], recon[i,:,1])
 plt.plot(recon[i,:,2], recon[i,:,3])
