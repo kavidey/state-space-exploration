@@ -73,13 +73,24 @@ embedding_dim = 10
 # test = []
 # for i in range(dset_len):
 #     positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
+    
+#     positions_sorted = []
+#     for j in range(positions.shape[0]):
+#         positions_sorted.append(
+#             jnp.sort(positions[j].reshape((3,2)), axis=0).flatten()
+#         )
+#     positions_sorted = jnp.array(positions_sorted)
+
+#     # p = positions
+#     p = positions_sorted
+
 #     position_vec = jnp.hstack((
-#         get_embedding_b(positions[:,0], embedding_dim, 4),
-#         get_embedding_b(positions[:,1], embedding_dim, 4),
-#         get_embedding_b(positions[:,2], embedding_dim, 4),
-#         get_embedding_b(positions[:,3], embedding_dim, 4),
-#         get_embedding_b(positions[:,4], embedding_dim, 4),
-#         get_embedding_b(positions[:,5], 10, 4),
+#         get_embedding_b(p[:,0], embedding_dim, 4),
+#         get_embedding_b(p[:,1], embedding_dim, 4),
+#         get_embedding_b(p[:,2], embedding_dim, 4),
+#         get_embedding_b(p[:,3], embedding_dim, 4),
+#         get_embedding_b(p[:,4], embedding_dim, 4),
+#         get_embedding_b(p[:,5], 10, 4),
 #         (positions - 5)
 #     ))
 #     train.append(np.asarray(position_vec))
@@ -87,23 +98,34 @@ embedding_dim = 10
 
 # for i in range(100):
 #     positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
+    
+#     positions_sorted = []
+#     for j in range(positions.shape[0]):
+#         positions_sorted.append(
+#             jnp.sort(positions[j].reshape((3,2)), axis=0).flatten()
+#         )
+#     positions_sorted = jnp.array(positions_sorted)
+
+#     # p = positions
+#     p = positions_sorted
+
 #     position_vec = jnp.hstack((
-#         get_embedding_b(positions[:,0], embedding_dim, 4),
-#         get_embedding_b(positions[:,1], embedding_dim, 4),
-#         get_embedding_b(positions[:,2], embedding_dim, 4),
-#         get_embedding_b(positions[:,3], embedding_dim, 4),
-#         get_embedding_b(positions[:,4], embedding_dim, 4),
-#         get_embedding_b(positions[:,5], embedding_dim, 4),
+#         get_embedding_b(p[:,0], embedding_dim, 4),
+#         get_embedding_b(p[:,1], embedding_dim, 4),
+#         get_embedding_b(p[:,2], embedding_dim, 4),
+#         get_embedding_b(p[:,3], embedding_dim, 4),
+#         get_embedding_b(p[:,4], embedding_dim, 4),
+#         get_embedding_b(p[:,5], 10, 4),
 #         (positions - 5)
 #     ))
 #     test.append(np.asarray(position_vec))
 # test = np.array(test)
 
-# np.savez(dataset_dir / "train_embedding.npz", train)
-# np.savez(dataset_dir / "test_embedding.npz", test)
+# np.savez(dataset_dir / "train_embedding_sorted.npz", train)
+# np.savez(dataset_dir / "test_embedding_sorted.npz", test)
 # %%
-train = np.load(dataset_dir/"train_embedding.npz")['arr_0']
-test = np.load(dataset_dir/"test_embedding.npz")['arr_0']
+train = np.load(dataset_dir/"train_embedding_sorted.npz")['arr_0']
+test = np.load(dataset_dir/"test_embedding_sorted.npz")['arr_0']
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size)
