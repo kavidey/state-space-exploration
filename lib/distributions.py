@@ -96,7 +96,8 @@ def MVN_kl_divergence(mu_0, sigma_0, mu_1, sigma_1):
     k = mu_0.shape[-1]
 
     # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
-    a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
+    # a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
+    a = jnp.trace(jnp.linalg.solve(sigma_1, sigma_0))
     mean_diff = mu_1 - mu_0
     # b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
     b = mean_diff.T @ jnp.linalg.solve(sigma_1, mean_diff)

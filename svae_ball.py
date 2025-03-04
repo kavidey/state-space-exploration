@@ -32,21 +32,24 @@ jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
 jax.config.update('jax_platform_name', 'cpu')
 # %%
+dset_len = 1024
+embedding_dim = 10
+num_balls = 1
+
 key = jnr.PRNGKey(42)
 
-warmup_epochs = 125
+warmup_epochs = 10
 warmup_kl_weight = 0.01
 
-epochs = 500
+epochs = 100
 batch_size = 32
-latent_dims = 18
+latent_dims = num_balls*2*2
 
 kl_weight = 0.05
-kl_ramp = 30 # The epoch where the KL weight reaches its final value
 
 A_init_epsilon = 0.01
 Q_init_stdev = 0.02
-model_name = f"svae_lds.ptr_{warmup_epochs}_{warmup_kl_weight}.klw_{kl_weight:.2f}.klr_{kl_ramp}.ep_{epochs}"
+model_name = f"svae_ball.ptr_{warmup_epochs}_{warmup_kl_weight}.klw_{kl_weight:.2f}.ep_{epochs}"
 
 checkpoint_path = (Path("vae_checkpoints") / f"{model_name}_{time.strftime('%Y%m%d-%H%M%S')}").absolute()
 checkpoint_path.mkdir(parents=True)
@@ -66,69 +69,69 @@ get_embedding_b = jax.vmap(get_embedding, (0, None, None))
 for i in jnp.linspace(-10, 10, 20):
     plt.plot(get_embedding(i, 10, n=4))
 # %%
-dset_len = 1024
-embedding_dim = 10
+gen_dataset = True
 
-# train = []
-# test = []
-# for i in range(dset_len):
-#     positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
-    
-#     positions_sorted = []
-#     for j in range(positions.shape[0]):
-#         positions_sorted.append(
-#             jnp.sort(positions[j].reshape((3,2)), axis=0).flatten()
-#         )
-#     positions_sorted = jnp.array(positions_sorted)
+if gen_dataset:
+    train = []
+    test = []
+    for i in range(dset_len):
+        positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
+        
+        # positions_sorted = []
+        # for j in range(positions.shape[0]):
+        #     positions_sorted.append(
+        #         jnp.sort(positions[j].reshape((3,2)), axis=0).flatten()
+        #     )
+        # positions_sorted = jnp.array(positions_sorted)
 
-#     # p = positions
-#     p = positions_sorted
+        # p = positions_sorted
+        p = positions
 
-#     position_vec = jnp.hstack((
-#         get_embedding_b(p[:,0], embedding_dim, 4),
-#         get_embedding_b(p[:,1], embedding_dim, 4),
-#         get_embedding_b(p[:,2], embedding_dim, 4),
-#         get_embedding_b(p[:,3], embedding_dim, 4),
-#         get_embedding_b(p[:,4], embedding_dim, 4),
-#         get_embedding_b(p[:,5], 10, 4),
-#         (positions - 5)
-#     ))
-#     train.append(np.asarray(position_vec))
-# train = np.array(train)
+        position_vec = jnp.hstack((
+            get_embedding_b(p[:,0], embedding_dim, 4),
+            get_embedding_b(p[:,1], embedding_dim, 4),
+            # get_embedding_b(p[:,2], embedding_dim, 4),
+            # get_embedding_b(p[:,3], embedding_dim, 4),
+            # get_embedding_b(p[:,4], embedding_dim, 4),
+            # get_embedding_b(p[:,5], embedding_dim, 4),
+            (positions[:, :2] - 5)
+        ))
+        train.append(np.asarray(position_vec))
+    train = np.array(train)
 
-# for i in range(100):
-#     positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
-    
-#     positions_sorted = []
-#     for j in range(positions.shape[0]):
-#         positions_sorted.append(
-#             jnp.sort(positions[j].reshape((3,2)), axis=0).flatten()
-#         )
-#     positions_sorted = jnp.array(positions_sorted)
+    for i in range(100):
+        positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
+        
+        # positions_sorted = []
+        # for j in range(positions.shape[0]):
+        #     positions_sorted.append(
+        #         jnp.sort(positions[j].reshape((3,2)), axis=0).flatten()
+        #     )
+        # positions_sorted = jnp.array(positions_sorted)
 
-#     # p = positions
-#     p = positions_sorted
+        # p = positions_sorted
+        p = positions
 
-#     position_vec = jnp.hstack((
-#         get_embedding_b(p[:,0], embedding_dim, 4),
-#         get_embedding_b(p[:,1], embedding_dim, 4),
-#         get_embedding_b(p[:,2], embedding_dim, 4),
-#         get_embedding_b(p[:,3], embedding_dim, 4),
-#         get_embedding_b(p[:,4], embedding_dim, 4),
-#         get_embedding_b(p[:,5], 10, 4),
-#         (positions - 5)
-#     ))
-#     test.append(np.asarray(position_vec))
-# test = np.array(test)
+        position_vec = jnp.hstack((
+            get_embedding_b(p[:,0], embedding_dim, 4),
+            get_embedding_b(p[:,1], embedding_dim, 4),
+            # get_embedding_b(p[:,2], embedding_dim, 4),
+            # get_embedding_b(p[:,3], embedding_dim, 4),
+            # get_embedding_b(p[:,4], embedding_dim, 4),
+            # get_embedding_b(p[:,5], embedding_dim, 4),
+            (positions[:, :2] - 5)
+        ))
+        test.append(np.asarray(position_vec))
+    test = np.array(test)
 
-# np.savez(dataset_dir / "train_embedding_sorted.npz", train)
-# np.savez(dataset_dir / "test_embedding_sorted.npz", test)
+    np.savez(dataset_dir / "train_embedding_1ball.npz", train)
+    np.savez(dataset_dir / "test_embedding_1ball.npz", test)
 # %%
-train = np.load(dataset_dir/"train_embedding_sorted.npz")['arr_0']
-test = np.load(dataset_dir/"test_embedding_sorted.npz")['arr_0']
+train = np.load(dataset_dir/"train_embedding_1ball.npz")['arr_0']
+test = np.load(dataset_dir/"test_embedding_1ball.npz")['arr_0']
 
-train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size)
-test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size)
+train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
+test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
 
 process_batch = jnp.array
 setup_batch = process_batch(next(iter(train_dataloader)))
@@ -178,7 +181,7 @@ class Decoder(nn.Module):
     def __call__(self, z):
         # z = nn.Dense(10, name="dec_fc1")(z)
         # z = nn.relu(z)
-        z = nn.Dense(6, name="dec_fc2")(z)
+        z = nn.Dense(num_balls*2, name="dec_fc2")(z)
         return z
 
 class VAE(nn.Module):
@@ -242,16 +245,16 @@ Batched_SVAE_LDS = nn.vmap(SVAE_LDS,
 def create_train_step_warmup(
             key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch[..., :6*embedding_dim], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
+    params = model.init(key, setup_batch[..., :2*num_balls*embedding_dim], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
     def loss_fn(params, x, key, kl_weight):
         bs = x.shape[0]
 
-        recon, q_dist = model.apply(params, x[...,:6*embedding_dim], jnr.split(key, x.shape[0]))
+        recon, q_dist = model.apply(params, x[...,:2*num_balls*embedding_dim], jnr.split(key, x.shape[0]))
 
         def unbatched_loss(x, recon, q_dist):
-            mse_loss = optax.l2_loss(recon, x[...,-6:])
+            mse_loss = optax.l2_loss(recon, x[...,-2*num_balls:])
             k = q_dist[0].shape[1]
             kl_loss = jax.vmap(lambda q_dist: MVN_kl_divergence(q_dist[0], q_dist[1], jnp.zeros((k)), jnp.eye(k)))(q_dist)
 
@@ -306,7 +309,7 @@ restored_warmup_params = mngr.restore(mngr.latest_step(), warmup_params)
 def create_pred_step(model: nn.Module, params):
     @jax.jit
     def pred_step(x, key):
-        recon, q_dist = model.apply(params, x[..., :6*embedding_dim], jnr.split(key, x.shape[0]))
+        recon, q_dist = model.apply(params, x[..., :2*num_balls*embedding_dim], jnr.split(key, x.shape[0]))
         return recon, q_dist
     
     return pred_step
@@ -316,7 +319,7 @@ pred_step = create_pred_step(warmup_model, restored_warmup_params)
 
 recon, q_dist = pred_step(sample_batch, key)
 f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
-i = 0
+i = 1
 
 ax[0].imshow(sample_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[0].set_title('Sequence')
@@ -329,27 +332,23 @@ ax[2].set_title('Each Dimension of the Latent Variable')
 
 plt.show()
 # %%
-plt.plot(sample_batch[i,:,6*embedding_dim+0], sample_batch[i,:,6*embedding_dim+1], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,6*embedding_dim+2], sample_batch[i,:,6*embedding_dim+3], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,6*embedding_dim+4], sample_batch[i,:,6*embedding_dim+5], c='black', linewidth=2)
-
-plt.plot(recon[i,:,0], recon[i,:,1])
-plt.plot(recon[i,:,2], recon[i,:,3])
-plt.plot(recon[i,:,4], recon[i,:,5])
+for j in range(num_balls):
+    plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
+    plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
 # %% LDS Train Code
 def create_train_step(
     key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch[..., :6*embedding_dim], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
+    params = model.init(key, setup_batch[..., :2*num_balls*embedding_dim], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
     def loss_fn(params, x, key, kl_weight):
         bs = x.shape[0]
 
-        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :6*embedding_dim], jnr.split(key, x.shape[0]))
+        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :2*num_balls*embedding_dim], jnr.split(key, x.shape[0]))
 
         def unbatched_loss(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik):
-            mse_loss = optax.l2_loss(recon, x[..., -6:])
+            mse_loss = optax.l2_loss(recon, x[..., -2*num_balls:])
             
             def observation_likelihood(z_hat, q_z, p_z):
                 k = z_hat[0].shape[-1]
@@ -403,7 +402,7 @@ running_loss = []
 running_mse = []
 running_kl = []
 
-pbar = tqdm(range(epochs + kl_ramp))
+pbar = tqdm(range(epochs))
 for epoch in pbar:
     total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
     for i, batch in enumerate(train_dataloader):
@@ -411,7 +410,7 @@ for epoch in pbar:
 
         batch = process_batch(batch)
         params1, opt_state, loss, mse_loss, kl_loss = train_step(
-            params, opt_state, batch, subkey, min(epoch / kl_ramp, 1) * kl_weight
+            params, opt_state, batch, subkey, kl_weight
         )
 
         contains_nan = False
@@ -463,7 +462,7 @@ print("A", restored_params["params"]["kf_A"])
 print("b", restored_params["params"]["kf_b"])
 print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %% LDS Reconstruction
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :60], key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :2*num_balls*embedding_dim], key)
 f, ax = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
 i = 0
@@ -482,20 +481,15 @@ ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 plt.show()
 # %%
-plt.plot(sample_batch[i,:,6*embedding_dim+0], sample_batch[i,:,6*embedding_dim+1], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,6*embedding_dim+2], sample_batch[i,:,6*embedding_dim+3], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,6*embedding_dim+4], sample_batch[i,:,6*embedding_dim+5], c='black', linewidth=2)
-
-plt.plot(recon[i,:,0], recon[i,:,1])
-plt.plot(recon[i,:,2], recon[i,:,3])
-plt.plot(recon[i,:,4], recon[i,:,5])
+for j in range(num_balls):
+    plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
+    plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
 # %% LDS Imputation
-masked_batch = sample_batch.at[:,10:40].set(0)
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(masked_batch[..., :60], key)
+masked_batch = sample_batch.at[:,20:30].set(0)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(masked_batch[..., :2*num_balls*embedding_dim], key)
 
 f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
-i = 20
 
 ax[0].imshow(masked_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[0].set_title('Masked Sequence')
@@ -514,11 +508,7 @@ ax[4].set_title('Latent Posterior Samples')
 
 plt.show()
 # %%
-plt.plot(sample_batch[i,:,6*embedding_dim+0], sample_batch[i,:,6*embedding_dim+1], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,6*embedding_dim+2], sample_batch[i,:,6*embedding_dim+3], c='black', linewidth=2)
-plt.plot(sample_batch[i,:,6*embedding_dim+4], sample_batch[i,:,6*embedding_dim+5], c='black', linewidth=2)
-
-plt.plot(recon[i,:,0], recon[i,:,1])
-plt.plot(recon[i,:,2], recon[i,:,3])
-plt.plot(recon[i,:,4], recon[i,:,5])
+for j in range(num_balls):
+    plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
+    plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
 # %%
