@@ -41,9 +41,10 @@ key = jnr.PRNGKey(42)
 warmup_epochs = 10
 warmup_kl_weight = 0.01
 
-epochs = 100
+epochs = 50
 batch_size = 32
-latent_dims = num_balls*2*2
+# latent_dims = num_balls*2*2
+latent_dims = 4
 
 kl_weight = 0.05
 
@@ -69,9 +70,7 @@ get_embedding_b = jax.vmap(get_embedding, (0, None, None))
 for i in jnp.linspace(-10, 10, 20):
     plt.plot(get_embedding(i, 10, n=4))
 # %%
-gen_dataset = True
-
-if gen_dataset:
+if False:
     train = []
     test = []
     for i in range(dset_len):
@@ -127,8 +126,53 @@ if gen_dataset:
     np.savez(dataset_dir / "train_embedding_1ball.npz", train)
     np.savez(dataset_dir / "test_embedding_1ball.npz", test)
 # %%
-train = np.load(dataset_dir/"train_embedding_1ball.npz")['arr_0']
-test = np.load(dataset_dir/"test_embedding_1ball.npz")['arr_0']
+if False:
+    train = []
+    test = []
+    for i in range(dset_len):
+        key, tmp_key = jnr.split(key)
+        start_stop = jnr.uniform(tmp_key, (num_balls, 2, 2)) * 10 - 5
+
+        positions = []
+        for i in range(num_balls):
+            positions.extend([
+                jnp.linspace(start_stop[i, 0, 0], start_stop[i, 1, 0]), # x
+                jnp.linspace(start_stop[i, 0, 1], start_stop[i, 1, 1]), # y
+            ])
+        positions = np.array(positions)
+
+        position_vec = jnp.hstack([
+            get_embedding_b(p, embedding_dim, 4) for p in positions
+        ] + [positions.T])
+
+        train.append(np.asarray(position_vec))
+
+    for i in range(100):
+        key, tmp_key = jnr.split(key)
+        start_stop = jnr.uniform(tmp_key, (num_balls, 2, 2)) * 10 - 5
+
+        positions = []
+        for i in range(num_balls):
+            positions.extend([
+                jnp.linspace(start_stop[i, 0, 0], start_stop[i, 1, 0]), # x
+                jnp.linspace(start_stop[i, 0, 1], start_stop[i, 1, 1]), # y
+            ])
+        positions = np.array(positions)
+
+        position_vec = jnp.hstack([
+            get_embedding_b(p, embedding_dim, 4) for p in positions
+        ] + [positions.T])
+
+        test.append(np.asarray(position_vec))
+
+    train = np.array(train)
+    test = np.array(test)
+
+    np.savez(dataset_dir / "train_embedding_straight.npz", train)
+    np.savez(dataset_dir / "test_embedding_straight.npz", test)
+# %%
+train = np.load(dataset_dir/"train_embedding_straight.npz")['arr_0']
+test = np.load(dataset_dir/"test_embedding_straight.npz")['arr_0']
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
@@ -179,8 +223,8 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     @nn.compact
     def __call__(self, z):
-        # z = nn.Dense(10, name="dec_fc1")(z)
-        # z = nn.relu(z)
+        z = nn.Dense(4, name="dec_fc1")(z)
+        z = nn.relu(z)
         z = nn.Dense(num_balls*2, name="dec_fc2")(z)
         return z
 
@@ -287,7 +331,7 @@ optimizer = optax.adam(learning_rate=1e-3)
 train_step, warmup_params, opt_state = create_train_step_warmup(model_key, warmup_model, optimizer)
 # %% VAE Training
 mngr = ocp.CheckpointManager(checkpoint_path/"vae_warmup", options=ocp_options)
-pbar = tqdm(range(warmup_epochs))
+pbar = tqdm(range(200))
 for epoch in pbar:
     total_loss = 0.0
     for i, batch in enumerate(train_dataloader):
@@ -319,7 +363,7 @@ pred_step = create_pred_step(warmup_model, restored_warmup_params)
 
 recon, q_dist = pred_step(sample_batch, key)
 f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
-i = 1
+i = 0
 
 ax[0].imshow(sample_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[0].set_title('Sequence')
@@ -465,7 +509,7 @@ print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :2*num_balls*embedding_dim], key)
 f, ax = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
-i = 0
+i = 1
 
 ax[0].imshow(sample_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[0].set_title('Sequence')
