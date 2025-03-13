@@ -47,6 +47,7 @@ batch_size = 32
 latent_dims = 4
 
 kl_weight = 0.05
+kl_ramp = 5
 
 A_init_epsilon = 0.01
 Q_init_stdev = 0.02
@@ -262,8 +263,13 @@ class SVAE_LDS(nn.Module):
             "kf_Q", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
         )
 
-    def __call__(self, x, z_rng):
+    def __call__(self, x, mask, z_rng, masked_cov_size=1e5):
+        '''
+        mask should be 1 for masked items and 0 for available ones
+        '''
         z_hat = self.encoder(x)
+        masked_cov = (jnp.eye(self.latent_dims) * masked_cov_size) * mask[:, None, None]
+        z_hat = (z_hat[0], z_hat[1] + masked_cov)
 
         z_t_sub_1 = (
             jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
@@ -383,13 +389,13 @@ for j in range(num_balls):
 def create_train_step(
     key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch[..., :2*num_balls*embedding_dim], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
+    params = model.init(key, setup_batch[..., :2*num_balls*embedding_dim], jnp.zeros(setup_batch.shape[:2]), jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
-    def loss_fn(params, x, key, kl_weight):
+    def loss_fn(params, x, mask, key, kl_weight):
         bs = x.shape[0]
 
-        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :2*num_balls*embedding_dim], jnr.split(key, x.shape[0]))
+        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :2*num_balls*embedding_dim], mask, jnr.split(key, x.shape[0]))
 
         def unbatched_loss(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik):
             mse_loss = optax.l2_loss(recon, x[..., -2*num_balls:])
@@ -413,8 +419,8 @@ def create_train_step(
         return loss, (mse_loss, kl_loss)
 
     @jax.jit
-    def train_step(params, opt_state, x, key, kl_weight):
-        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key, kl_weight)
+    def train_step(params, opt_state, x, mask, key, kl_weight):
+        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, mask, key, kl_weight)
 
         loss, (mse_loss, kl_loss) = losses
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -454,7 +460,7 @@ for epoch in pbar:
 
         batch = process_batch(batch)
         params1, opt_state, loss, mse_loss, kl_loss = train_step(
-            params, opt_state, batch, subkey, kl_weight
+            params, opt_state, batch, jnp.zeros(batch.shape[:2]), subkey, min(epoch / kl_ramp, 1) * kl_weight
         )
 
         contains_nan = False
@@ -492,8 +498,8 @@ restored_params = mngr.restore(mngr.latest_step(), params)
 
 def create_pred_step(model: nn.Module, params):
     @jax.jit
-    def pred_step(x, key):
-        x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, jnr.split(key, x.shape[0]))
+    def pred_step(x, mask, key):
+        x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, mask, jnr.split(key, x.shape[0]))
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
     
     return pred_step
@@ -506,10 +512,10 @@ print("A", restored_params["params"]["kf_A"])
 print("b", restored_params["params"]["kf_b"])
 print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %% LDS Reconstruction
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :2*num_balls*embedding_dim], key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :2*num_balls*embedding_dim], jnp.zeros(sample_batch.shape[:2]), key)
 f, ax = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
-i = 1
+i = 0
 
 ax[0].imshow(sample_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[0].set_title('Sequence')
@@ -529,8 +535,9 @@ for j in range(num_balls):
     plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
     plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
 # %% LDS Imputation
-masked_batch = sample_batch.at[:,20:30].set(0)
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(masked_batch[..., :2*num_balls*embedding_dim], key)
+mask = jnp.zeros(sample_batch.shape[:2]).at[:, 10:40].set(1)
+masked_batch = sample_batch * jnp.logical_not(mask)[:, :, None]
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :2*num_balls*embedding_dim], mask, key)
 
 f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
