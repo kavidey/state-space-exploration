@@ -28,7 +28,7 @@ tfb = tfp.bijectors
 from lib.distributions import MVN_kl_divergence
 from lib.priors import KalmanFilter
 
-jax.config.update("jax_debug_nans", True)
+# jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
 jax.config.update('jax_platform_name', 'cpu')
 # %%
@@ -41,10 +41,9 @@ key = jnr.PRNGKey(42)
 warmup_epochs = 10
 warmup_kl_weight = 0.01
 
-epochs = 50
+epochs = 200
 batch_size = 32
-# latent_dims = num_balls*2*2
-latent_dims = 4
+latent_dims = num_balls*2*2
 
 kl_weight = 0.05
 kl_ramp = 5
@@ -172,8 +171,8 @@ if False:
     np.savez(dataset_dir / "train_embedding_straight.npz", train)
     np.savez(dataset_dir / "test_embedding_straight.npz", test)
 # %%
-train = np.load(dataset_dir/"train_embedding_straight.npz")['arr_0']
-test = np.load(dataset_dir/"test_embedding_straight.npz")['arr_0']
+train = np.load(dataset_dir/"train_embedding_1ball.npz")['arr_0']
+test = np.load(dataset_dir/"test_embedding_1ball.npz")['arr_0']
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
@@ -263,19 +262,17 @@ class SVAE_LDS(nn.Module):
             "kf_Q", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
         )
 
-    def __call__(self, x, mask, z_rng, masked_cov_size=1e5):
+    def __call__(self, x, mask, z_rng):
         '''
         mask should be 1 for masked items and 0 for available ones
         '''
         z_hat = self.encoder(x)
-        masked_cov = (jnp.eye(self.latent_dims) * masked_cov_size) * mask[:, None, None]
-        z_hat = (z_hat[0], z_hat[1] + masked_cov)
 
         z_t_sub_1 = (
             jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
         )
 
-        f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+        f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims), mask=mask)
         q_dist = KalmanFilter.run_backward(f_dist, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
         z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)
@@ -337,7 +334,7 @@ optimizer = optax.adam(learning_rate=1e-3)
 train_step, warmup_params, opt_state = create_train_step_warmup(model_key, warmup_model, optimizer)
 # %% VAE Training
 mngr = ocp.CheckpointManager(checkpoint_path/"vae_warmup", options=ocp_options)
-pbar = tqdm(range(200))
+pbar = tqdm(range(warmup_epochs))
 for epoch in pbar:
     total_loss = 0.0
     for i, batch in enumerate(train_dataloader):
@@ -385,6 +382,8 @@ plt.show()
 for j in range(num_balls):
     plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
     plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
+plt.xlim(-5, 5)
+plt.ylim(-5, 5)
 # %% LDS Train Code
 def create_train_step(
     key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
@@ -535,7 +534,7 @@ for j in range(num_balls):
     plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
     plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
 # %% LDS Imputation
-mask = jnp.zeros(sample_batch.shape[:2]).at[:, 10:40].set(1)
+mask = jnp.zeros(sample_batch.shape[:2]).at[:, 20:30].set(1)
 masked_batch = sample_batch * jnp.logical_not(mask)[:, :, None]
 recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :2*num_balls*embedding_dim], mask, key)
 
@@ -562,4 +561,6 @@ plt.show()
 for j in range(num_balls):
     plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
     plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
+plt.xlim(-5, 5)
+plt.ylim(-5, 5)
 # %%

@@ -1,6 +1,5 @@
 # %%
 import time
-from typing import Tuple
 from pathlib import Path
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
@@ -28,7 +27,7 @@ tfb = tfp.bijectors
 from lib.distributions import MVN_kl_divergence
 from lib.priors import KalmanFilter
 
-jax.config.update("jax_debug_nans", True)
+# jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
 # %%
 key = jnr.PRNGKey(42)
@@ -183,19 +182,17 @@ class SVAE_LDS(nn.Module):
             "kf_Q", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
         )
 
-    def __call__(self, x, mask, z_rng, masked_cov_size=1e5):
+    def __call__(self, x, mask, z_rng):
         '''
         mask should be 1 for masked items and 0 for available ones
         '''
         z_hat = self.encoder(x)
-        masked_cov = (jnp.eye(self.latent_dims) * masked_cov_size) * mask[:, None, None]
-        z_hat = (z_hat[0], z_hat[1] + masked_cov)
 
         z_t_sub_1 = (
             jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
         )
 
-        f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+        f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims), mask=mask)
         q_dist = KalmanFilter.run_backward(f_dist, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
         z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)

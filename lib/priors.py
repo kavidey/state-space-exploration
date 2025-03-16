@@ -1,24 +1,45 @@
-from typing import Tuple
 import jax
 import jax.numpy as jnp
 
 from lib.distributions import MVN_log_likelihood, MVN_multiply
 class KalmanFilter:
     @staticmethod
-    def run_forward(z, z_t_sub_1, A, b, Q, H):
+    def run_forward(z, z_t_sub_1, A, b, Q, H, mask):
         """
         Run Kalman Filter forward pass on a sequence of distributions and return results
+
+        Parameter
+        ---------
+        z: tuple[jnp.array, jnp.array]
+            list of observations to run the filter on represented as (mean, covariance)
+        z_t_sub_1: tuple[jnp.array, jnp.array]
+            prior on z[0] represented as (mean, covariance)
+        A: jnp.array
+            state transition matrix
+        b: jnp.array
+            state transition offset
+        Q: jnp.array
+            process noise covariance matrix
+        H: jnp.array
+            observation matrix
+
+        Returns
+        -------
+        tuple[tuple[jnp.array, jnp.array], tuple[jnp.array, jnp.array], jnp.array]
+            q_dist, p_dist, log_likelihood
+
         """
-        kf_forward = lambda carry, z_t: KalmanFilter.forward(carry, z_t, A, b, Q, H)
+        kf_forward = lambda carry, xs: KalmanFilter.forward(carry, xs[0], A, b, Q, H, xs[1]) # z_t = xs[0], mask = xs[1]
 
         z_1 = (z[0][0], z[1][0])
         q_1 = KalmanFilter.update(z_t_sub_1,
                                   z_1,
-                                  H)
+                                  H,
+                                  mask[0])
         p_1 = z_t_sub_1
         log_likelihood1 = MVN_multiply(z_1[0], z_1[1], p_1[0], p_1[1])[0]
         if z[0].shape[0] > 1:
-            _, result = jax.lax.scan(kf_forward, (q_1), (z[0][1:], z[1][1:]))
+            _, result = jax.lax.scan(kf_forward, (q_1), ((z[0][1:], z[1][1:]), mask[1:]))
             q_dist, p_dist, log_likelihood = result
 
             q_dist = (
@@ -44,7 +65,7 @@ class KalmanFilter:
             ), jnp.array([log_likelihood1])
     
     @staticmethod
-    def forward(carry, z_t, A, b, Q, H):
+    def forward(carry, z_t, A, b, Q, H, mask=0):
         """
         Single iteration of Kalman Filter forward pass
         """
@@ -54,7 +75,7 @@ class KalmanFilter:
         z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
 
         # Update
-        z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H)
+        z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H, mask=mask)
 
         # Log-Likelihood
         log_likelihood = MVN_log_likelihood(
@@ -79,7 +100,7 @@ class KalmanFilter:
 
     @staticmethod
     def update(
-        z_t_given_t_sub_1: Tuple[jnp.array, jnp.array], x_t: jnp.array, H: jnp.array
+        z_t_given_t_sub_1: tuple[jnp.array, jnp.array], x_t: jnp.array, H: jnp.array, mask = 0
     ):
         """
         Kalman filter update step
@@ -108,12 +129,30 @@ class KalmanFilter:
         # P_t|t = P_t|t-1 - K_t @ S @ K_t^T
         sigma = z_t_given_t_sub_1[1] - K_t @ S_t @ K_t.T
 
-        return (mu, sigma)
+        return jax.lax.cond(mask, lambda: z_t_given_t_sub_1, lambda: (mu, sigma))
     
     @staticmethod
-    def run_backward(p_dist, A, b, Q, H) -> Tuple[jnp.array, jnp.array]:
+    def run_backward(p_dist, A, b, Q, H) -> tuple[jnp.array, jnp.array]:
         """
         Run Kalman Filter backward pass on a sequence of distributions and return results
+
+        Parameter
+        ---------
+        p_dist: tuple[jnp.array, jnp.array]
+            predicted state distribution represented as (mean, covariance)
+        A: jnp.array
+            state transition matrix
+        b: jnp.array
+            state transition offset
+        Q: jnp.array
+            process noise covariance matrix
+        H: jnp.array
+            observation matrix
+        
+        Returns
+        -------
+        q_dist: tuple[jnp.array, jnp.array]
+            smoothed state distribution represented as (mean, covariance)
         """
         kf_backward = lambda carry, z_t: KalmanFilter.backward(carry, z_t, A, b, Q, H)
         
@@ -129,7 +168,10 @@ class KalmanFilter:
         return q_dist
     
     @staticmethod
-    def backward(carry, z_t: Tuple[jnp.array, jnp.array], A, b, Q, H):
+    def backward(carry, z_t: tuple[jnp.array, jnp.array], A, b, Q, H):
+        """
+        Kalman Filter Smooth Step
+        """
         z_t_plus_1 = carry
 
         # A @ P_t @ A^T + Q
