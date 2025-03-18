@@ -34,11 +34,11 @@ jax.config.update('jax_platform_name', 'cpu')
 # %%
 dset_len = 1024
 embedding_dim = 10
-num_balls = 1
+num_balls = 2
 
 key = jnr.PRNGKey(42)
 
-warmup_epochs = 10
+warmup_epochs = 30
 warmup_kl_weight = 0.01
 
 epochs = 200
@@ -63,6 +63,7 @@ dataset_dir = Path("dataset") / "billiard"
 train_dset = jnp.load(dataset_dir/"train.npz")
 test_dset = jnp.load(dataset_dir/"test.npz")
 # %%
+@jax.jit
 def get_embedding(pos, embedding_dim, n=1000):
     return jnp.sin(pos/n**(2*np.arange(embedding_dim)/embedding_dim))
 get_embedding_b = jax.vmap(get_embedding, (0, None, None))
@@ -75,6 +76,7 @@ if False:
     test = []
     for i in range(dset_len):
         positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
+        positions = positions[:, :2*num_balls]
         
         # positions_sorted = []
         # for j in range(positions.shape[0]):
@@ -86,21 +88,14 @@ if False:
         # p = positions_sorted
         p = positions
 
-        position_vec = jnp.hstack((
-            get_embedding_b(p[:,0], embedding_dim, 4),
-            get_embedding_b(p[:,1], embedding_dim, 4),
-            # get_embedding_b(p[:,2], embedding_dim, 4),
-            # get_embedding_b(p[:,3], embedding_dim, 4),
-            # get_embedding_b(p[:,4], embedding_dim, 4),
-            # get_embedding_b(p[:,5], embedding_dim, 4),
-            (positions[:, :2] - 5)
-        ))
+        position_vec = jnp.hstack([get_embedding_b(p_, embedding_dim, 4) for p_ in p.T] + [p-5])
         train.append(np.asarray(position_vec))
+    
     train = np.array(train)
 
     for i in range(100):
         positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
-        
+        positions = positions[:, :2*num_balls]
         # positions_sorted = []
         # for j in range(positions.shape[0]):
         #     positions_sorted.append(
@@ -111,20 +106,12 @@ if False:
         # p = positions_sorted
         p = positions
 
-        position_vec = jnp.hstack((
-            get_embedding_b(p[:,0], embedding_dim, 4),
-            get_embedding_b(p[:,1], embedding_dim, 4),
-            # get_embedding_b(p[:,2], embedding_dim, 4),
-            # get_embedding_b(p[:,3], embedding_dim, 4),
-            # get_embedding_b(p[:,4], embedding_dim, 4),
-            # get_embedding_b(p[:,5], embedding_dim, 4),
-            (positions[:, :2] - 5)
-        ))
+        position_vec = jnp.hstack([get_embedding_b(p_, embedding_dim, 4) for p_ in p.T] + [p-5])
         test.append(np.asarray(position_vec))
     test = np.array(test)
 
-    np.savez(dataset_dir / "train_embedding_1ball.npz", train)
-    np.savez(dataset_dir / "test_embedding_1ball.npz", test)
+    np.savez(dataset_dir / "train_embedding_2ball.npz", train)
+    np.savez(dataset_dir / "test_embedding_2ball.npz", test)
 # %%
 if False:
     train = []
@@ -171,8 +158,8 @@ if False:
     np.savez(dataset_dir / "train_embedding_straight.npz", train)
     np.savez(dataset_dir / "test_embedding_straight.npz", test)
 # %%
-train = np.load(dataset_dir/"train_embedding_1ball.npz")['arr_0']
-test = np.load(dataset_dir/"test_embedding_1ball.npz")['arr_0']
+train = np.load(dataset_dir/"train_embedding_2ball.npz")['arr_0']
+test = np.load(dataset_dir/"test_embedding_2ball.npz")['arr_0']
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
@@ -288,7 +275,6 @@ Batched_SVAE_LDS = nn.vmap(SVAE_LDS,
     split_rngs={'params': False}
 )
 # %% VAE Train Code
-
 def create_train_step_warmup(
             key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
@@ -558,7 +544,10 @@ ax[4].set_title('Latent Posterior Samples')
 
 plt.show()
 # %%
+masked_with_none = sample_batch.copy().at[jnp.nonzero(jnp.logical_not(mask))].set(jnp.nan)
+
 for j in range(num_balls):
+    plt.plot(masked_with_none[i,:,2*num_balls*embedding_dim+2*j], masked_with_none[i,:,2*num_balls*embedding_dim+2*j+1], c='grey', linewidth=6)
     plt.plot(sample_batch[i,:,2*num_balls*embedding_dim+2*j], sample_batch[i,:,2*num_balls*embedding_dim+2*j+1], c='black', linewidth=2)
     plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
 plt.xlim(-5, 5)
