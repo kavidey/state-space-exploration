@@ -72,11 +72,6 @@ test_dataloader = torch.utils.data.DataLoader(list(zip(test_X, test_y)), batch_s
 
 process_batch = lambda x: (jnp.array(x[0]), jnp.array(x[1]))
 setup_batch = process_batch(next(iter(train_dataloader)))
-# %%
-for j in range(num_balls):
-    plt.plot(setup_batch[1][0,:,2*j], setup_batch[1][0,:,2*j+1], c='black', linewidth=2)
-plt.xlim(-5, 5)
-plt.ylim(-5, 5)
 # %% Network Definitions
 def initializer_diag_with_noise(epsilon: float):
     '''
@@ -185,6 +180,104 @@ Batched_SVAE_LDS = nn.vmap(SVAE_LDS,
     variable_axes={'params': None},
     split_rngs={'params': False}
 )
+# %% VAE Train Code
+def create_train_step_warmup(
+            key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
+):
+    setup_X = setup_batch[0].reshape(setup_batch[0].shape[:2]+(-1,))
+    params = model.init(key, setup_X, jnr.split(jnr.PRNGKey(0), setup_X.shape[0]))
+    opt_state = optimizer.init(params)
+
+    def loss_fn(params, batch, key, kl_weight):
+        x = batch[0].reshape(batch[0].shape[:2]+(-1,))
+        bs = x.shape[0]
+
+        recon, q_dist = model.apply(params, x, jnr.split(key, x.shape[0]))
+
+        def unbatched_loss(x, recon, q_dist):
+            mse_loss = optax.l2_loss(recon, x)
+            k = q_dist[0].shape[1]
+            kl_loss = jax.vmap(lambda q_dist: MVN_kl_divergence(q_dist[0], q_dist[1], jnp.zeros((k)), jnp.eye(k)))(q_dist)
+
+            return mse_loss, kl_loss
+        
+        losses = jax.vmap(unbatched_loss)(batch[1], recon, q_dist)
+        mse_loss = jnp.sum(losses[0]) / (bs * x.shape[1])
+        kl_loss = jnp.sum(losses[1]) / (bs * x.shape[1])
+
+        loss = mse_loss + kl_loss * kl_weight
+        return loss, (mse_loss, kl_loss)
+
+    @jax.jit
+    def train_step(params, opt_state, x, key, kl_weight):
+        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key, kl_weight)
+
+        loss, (mse_loss, kl_loss) = losses
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+
+        return params, opt_state, loss, mse_loss, kl_loss
+
+    return train_step, params, opt_state
+# %% Create VAE Model
+key, model_key = jnr.split(key)
+
+warmup_model = Batched_VAE(latent_dims=latent_dims)
+optimizer = optax.adam(learning_rate=1e-3)
+
+train_step, warmup_params, opt_state = create_train_step_warmup(model_key, warmup_model, optimizer)
+# %% VAE Training
+mngr = ocp.CheckpointManager(checkpoint_path/"vae_warmup", options=ocp_options)
+pbar = tqdm(range(warmup_epochs))
+for epoch in pbar:
+    total_loss = 0.0
+    for i, batch in enumerate(train_dataloader):
+        key, subkey = jnr.split(key)
+
+        batch = process_batch(batch)
+        warmup_params, opt_state, loss, mse_loss, kl_loss = train_step(
+            warmup_params, opt_state, batch, subkey, warmup_kl_weight
+        )
+
+        total_loss += loss
+
+    pbar.set_postfix_str(f"Loss: {total_loss/len(train_dataloader):.2f}")
+    mngr.save(epoch, args=ocp.args.StandardSave(warmup_params))
+mngr.wait_until_finished()
+# %% VAE Reconstruction and Evaluation
+restored_warmup_params = mngr.restore(mngr.latest_step(), warmup_params)
+
+def create_pred_step(model: nn.Module, params):
+    @jax.jit
+    def pred_step(batch, key):
+        recon, q_dist = model.apply(params, batch[0].reshape(batch[0].shape[:2]+(-1,)), jnr.split(key, batch[0].shape[0]))
+        return recon, q_dist
+    
+    return pred_step
+
+sample_batch = process_batch(next(iter(test_dataloader)))
+pred_step = create_pred_step(warmup_model, restored_warmup_params)
+
+recon, q_dist = pred_step(sample_batch, key)
+f, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
+i = 0
+
+ax[0].imshow(sample_batch[0][i].reshape((50, -1)).T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[0].set_title('Sequence')
+
+ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[1].set_title('Reconstruction')
+
+ax[2].plot(q_dist[0][i])
+ax[2].set_title('Each Dimension of the Latent Variable')
+
+plt.show()
+# %%
+for j in range(num_balls):
+    plt.plot(setup_batch[1][0,:,2*j], setup_batch[1][0,:,2*j+1], c='black', linewidth=2)
+    plt.plot(recon[i,:,2*j], recon[i,:,2*j+1])
+plt.xlim(-5, 5)
+plt.ylim(-5, 5)
 # %% LDS Train Code
 def create_train_step(
     key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
@@ -240,8 +333,8 @@ optimizer = optax.adam(learning_rate=1e-3)
 # optimizer = optax.sgd(learning_rate=1e-3)
 
 train_step, params, opt_state = create_train_step(model_key, model, optimizer)
-# params['params'].update({'encoder': warmup_params['params']['encoder'],
-#                          'decoder': warmup_params['params']['decoder']})
+params['params'].update({'encoder': warmup_params['params']['encoder'],
+                         'decoder': warmup_params['params']['decoder']})
 # %% Print LDS Parameters
 print("learned parameters", params["params"].keys())
 print("A", params["params"]["kf_A"])

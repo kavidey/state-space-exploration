@@ -34,7 +34,7 @@ jax.config.update('jax_platform_name', 'cpu')
 # %%
 dset_len = 1024
 embedding_dim = 10
-num_balls = 2
+num_balls = 3
 
 key = jnr.PRNGKey(42)
 
