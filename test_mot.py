@@ -13,7 +13,7 @@ from tensorflow_probability.substrates import jax as tfp
 from dynamax.utils.plotting import plot_uncertainty_ellipses
 from dynamax.linear_gaussian_ssm import LinearGaussianSSM
 from dynamax.linear_gaussian_ssm import lgssm_smoother, lgssm_filter
-from lib.priors import KalmanFilter
+from lib.priors import KalmanFilter, KalmanFilter_MOTPDA
 from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply, MVN_Type
 
 jax.config.update("jax_enable_x64", True)
@@ -142,39 +142,40 @@ q_1 = (jnp.array([5., 5.]), initial_covariance)
 ax.plot(*q_1[0], marker="s", color="tab:cyan", label="initial state")
 ax.legend()
 
-def evaluate_observation(z_t, z_t_given_t_sub_1, H):
-    z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H, mask=0)
+# def evaluate_observation(z_t, z_t_given_t_sub_1, H):
+#     z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H, mask=0)
     
-    # This is the same as the log likelihood calculation in KalmanFilter.forward
-    z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
-    w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
+#     # This is the same as the log likelihood calculation in KalmanFilter.forward
+#     z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+#     w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
 
-    return z_t_given_t, w_k
+#     return z_t_given_t, w_k
 
-def kf_mot_forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array):
-    z_t_sub_1 = carry
+# def kf_mot_forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array):
+#     z_t_sub_1 = carry
 
-    # Prediction
-    z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
+#     # Prediction
+#     z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
 
-    # Update
-    # find GMM that best represents observations
-    z_t_given_t_s, w_ks = jax.vmap(lambda z_t: evaluate_observation(z_t, z_t_given_t_sub_1, observation_matrix))((x_t[0], x_t[1]))
-    w_ks = w_ks / w_ks.sum()
-    # approximate that with a single moment-matched gaussian
-    z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
+#     # Update
+#     # find GMM that best represents observations
+#     z_t_given_t_s, w_ks = jax.vmap(lambda z_t: evaluate_observation(z_t, z_t_given_t_sub_1, observation_matrix))((x_t[0], x_t[1]))
+#     w_ks = w_ks / w_ks.sum()
+#     # approximate that with a single moment-matched gaussian
+#     z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
 
-    # Log-Likelihood
-    # project z_{t|t-1} into x (observation) space
-    z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
-    # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-    log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t)[0]
+#     # Log-Likelihood
+#     # project z_{t|t-1} into x (observation) space
+#     z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+#     # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+#     log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t)[0]
 
-    return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
+#     return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
 
-kf_forward = lambda carry, x: kf_mot_forward(carry, x, transition_matrix, jnp.zeros(ndims), transition_noise, jnp.eye(ndims))
-_, result = jax.lax.scan(kf_forward, q_1, zs)
-q_dist, p_dist, log_likelihood = result
+# kf_forward = lambda carry, x: kf_mot_forward(carry, x, transition_matrix, jnp.zeros(ndims), transition_noise, jnp.eye(ndims))
+# _, result = jax.lax.scan(kf_forward, q_1, zs)
+# q_dist, p_dist, log_likelihood = result
+q_dist, p_dist, log_likelihood = KalmanFilter_MOTPDA.run_forward(zs, q_1, transition_matrix, jnp.zeros(ndims), transition_noise, jnp.eye(ndims))
 
 ax.scatter(*q_dist[0].T, color="tab:red", label="ours")
 plot_uncertainty_ellipses(*q_dist, ax, **{"edgecolor": "tab:red", "linewidth": 0.5})

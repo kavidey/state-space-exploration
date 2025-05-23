@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from lib.distributions import MVN_Type, MVN_log_likelihood, MVN_multiply
+from lib.distributions import MVN_Type, MVN_log_likelihood, MVN_multiply, GMM_moment_match
 class KalmanFilter:
     @staticmethod
     def run_forward(x: MVN_Type, z_t_sub_1: MVN_Type, A: Array, b: Array, Q: Array, H: Array, mask):
@@ -200,3 +200,113 @@ class KalmanFilter:
         z_t_given_T = (mu, sigma)
 
         return (z_t_given_T), (z_t_given_T) # carry, (posterior_dist)
+
+class KalmanFilter_MOTPDA(KalmanFilter):
+    @staticmethod
+    def run_forward(x: MVN_Type, z_t_sub_1: MVN_Type, A: Array, b: Array, Q: Array, H: Array, mask=None):
+        """
+        Run Kalman Filter forward pass on a sequence of distributions and return results
+
+        Parameter
+        ---------
+        x: tuple[Array, Array]
+            list of observations to run the filter on represented as (mean, covariance)
+        z_t_sub_1: tuple[Array, Array]
+            prior on z[0] represented as (mean, covariance)
+        A: Array
+            state transition matrix
+        b: Array
+            state transition offset
+        Q: Array
+            process noise covariance matrix
+        H: Array
+            observation matrix
+        mask: None
+            unused
+
+        Returns
+        -------
+        tuple[tuple[Array, Array], tuple[Array, Array], Array]
+            q_dist, p_dist, log_likelihood
+
+        """
+        kf_forward = lambda carry, xs: KalmanFilter_MOTPDA.forward(carry, xs, A, b, Q, H, 0)
+
+        x_1 = (x[0][0], x[1][0])
+        q_1 = KalmanFilter_MOTPDA.update(z_t_sub_1,
+                                  x_1,
+                                  H,
+                                  0)
+        p_1 = z_t_sub_1
+
+        # p(x_1) = \int p(z_1) p(x_1|z_1) dz_1
+        log_likelihood1 = MVN_multiply(*x_1, *p_1)[0]
+        
+        if x[0].shape[0] > 1:
+            _, result = jax.lax.scan(kf_forward, (q_1), (x[0][1:], x[1][1:]))
+            q_dist, p_dist, log_likelihood = result
+
+            q_dist = (
+                jnp.vstack((jnp.expand_dims(q_1[0], axis=0), q_dist[0])),
+                jnp.vstack((jnp.expand_dims(q_1[1], axis=0), q_dist[1])),
+            )
+
+            p_dist = (
+                jnp.vstack((jnp.expand_dims(p_1[0], axis=0), p_dist[0])),
+                jnp.vstack((jnp.expand_dims(p_1[1], axis=0), p_dist[1])),
+            )
+
+            log_likelihood = jnp.append(jnp.array(log_likelihood1), log_likelihood)
+
+            return q_dist, p_dist, log_likelihood
+        else:
+            return (
+                jnp.expand_dims(q_1[0], axis=0),
+                jnp.expand_dims(q_1[1], axis=0)
+            ), (
+                jnp.expand_dims(p_1[0], axis=0),
+                jnp.expand_dims(p_1[1], axis=0),
+            ), jnp.array([log_likelihood1])
+    
+    @staticmethod
+    def forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array, mask=0):
+        """
+        Single iteration of Kalman Filter forward pass
+        """
+        z_t_sub_1 = carry
+
+        # Prediction
+        z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
+
+        # Update
+        z_t_given_t = KalmanFilter_MOTPDA.update(z_t_given_t_sub_1, x_t, H)
+
+        # Log-Likelihood
+        # project z_{t|t-1} into x (observation) space
+        z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+        # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+        log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t)[0]
+
+        return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
+    
+    @staticmethod
+    def update(
+        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, mask = 0
+    ):
+        # find GMM that best represents observations
+        z_t_given_t_s, w_ks = jax.vmap(lambda z_t: KalmanFilter_MOTPDA.evaluate_observation(z_t, z_t_given_t_sub_1, H))((x_t[0], x_t[1]))
+        w_ks = w_ks / w_ks.sum()
+        # approximate that with a single moment-matched gaussian
+        z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
+
+        return z_t_given_t
+    
+    @staticmethod
+    def evaluate_observation(z_t, z_t_given_t_sub_1, H):
+        z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H, mask=0)
+        
+        # This is the same as the log likelihood calculation in KalmanFilter.forward
+        z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+        w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
+
+        return z_t_given_t, w_k
