@@ -72,6 +72,24 @@ def MVN_multiply(m1: Array, c1: Array, m2: Array, c2: Array) -> tuple[float, MVN
     Calculates the product of gaussian densities
 
     Source: the matrix cookbook eqn 371
+
+
+    Parameter
+    ---------
+    m1: Array
+        mean of first gaussian
+    c1: Array
+        covariance of first gaussian
+    m2: Array
+        mean of second gaussian
+    c2: Array
+        covariance of second gaussian
+
+    Returns
+    -------
+    tuple[float, tuple[Array, Array]]
+        float, product_gaussian
+
     '''
 
     k = m1.shape[-1]
@@ -89,6 +107,9 @@ def MVN_multiply(m1: Array, c1: Array, m2: Array, c2: Array) -> tuple[float, MVN
     return c, (mean, cov)
 
 def MVN_log_likelihood(mean: Array, cov: Array, x: Array) -> float:
+    '''
+    Calculates the likelihood of the observation under the gaussian distribution
+    '''
     k = mean.shape[-1]
     mean_diff = mean - x
     # log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)

@@ -2,16 +2,16 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from lib.distributions import MVN_log_likelihood, MVN_multiply
+from lib.distributions import MVN_Type, MVN_log_likelihood, MVN_multiply
 class KalmanFilter:
     @staticmethod
-    def run_forward(z, z_t_sub_1, A, b, Q, H, mask):
+    def run_forward(x: MVN_Type, z_t_sub_1: MVN_Type, A: Array, b: Array, Q: Array, H: Array, mask):
         """
         Run Kalman Filter forward pass on a sequence of distributions and return results
 
         Parameter
         ---------
-        z: tuple[Array, Array]
+        x: tuple[Array, Array]
             list of observations to run the filter on represented as (mean, covariance)
         z_t_sub_1: tuple[Array, Array]
             prior on z[0] represented as (mean, covariance)
@@ -23,6 +23,8 @@ class KalmanFilter:
             process noise covariance matrix
         H: Array
             observation matrix
+        mask: Array
+            list of sample to mask observations for
 
         Returns
         -------
@@ -32,15 +34,18 @@ class KalmanFilter:
         """
         kf_forward = lambda carry, xs: KalmanFilter.forward(carry, xs[0], A, b, Q, H, xs[1]) # z_t = xs[0], mask = xs[1]
 
-        z_1 = (z[0][0], z[1][0])
+        x_1 = (x[0][0], x[1][0])
         q_1 = KalmanFilter.update(z_t_sub_1,
-                                  z_1,
+                                  x_1,
                                   H,
                                   mask[0])
         p_1 = z_t_sub_1
-        log_likelihood1 = MVN_multiply(z_1[0], z_1[1], p_1[0], p_1[1])[0]
-        if z[0].shape[0] > 1:
-            _, result = jax.lax.scan(kf_forward, (q_1), ((z[0][1:], z[1][1:]), mask[1:]))
+
+        # p(x_1) = \int p(z_1) p(x_1|z_1) dz_1
+        log_likelihood1 = MVN_multiply(*x_1, *p_1)[0]
+        
+        if x[0].shape[0] > 1:
+            _, result = jax.lax.scan(kf_forward, (q_1), ((x[0][1:], x[1][1:]), mask[1:]))
             q_dist, p_dist, log_likelihood = result
 
             q_dist = (
@@ -66,7 +71,7 @@ class KalmanFilter:
             ), jnp.array([log_likelihood1])
     
     @staticmethod
-    def forward(carry, z_t, A, b, Q, H, mask=0):
+    def forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array, mask=0):
         """
         Single iteration of Kalman Filter forward pass
         """
@@ -76,19 +81,19 @@ class KalmanFilter:
         z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
 
         # Update
-        z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H, mask=mask)
+        z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, x_t, H, mask=mask)
 
         # Log-Likelihood
-        log_likelihood = MVN_log_likelihood(
-            H @ z_t_given_t_sub_1[0],
-            z_t[1] + H @ z_t_given_t_sub_1[1] @ H.T,
-            z_t[0]
-        )
+        # project z_{t|t-1} into x (observation) space
+        z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+        # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+        log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t)[0]
         return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
     
     @staticmethod
-    def predict(z_t, A, b, Q):
+    def predict(z_t: MVN_Type, A: Array, b: Array, Q: Array):
         """
+        Kalman filter predict step
         P(z_t+1 | x_t, ..., x_1) = P(z_t+1 | z_t)
         """
         # z_t|t-1 = A @ z_t-1|t-1 + b
@@ -101,15 +106,18 @@ class KalmanFilter:
 
     @staticmethod
     def update(
-        z_t_given_t_sub_1: tuple[Array, Array], x_t: Array, H: Array, mask = 0
+        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, mask = 0
     ):
         """
         Kalman filter update step
         P(z_t+1 | x_t+1, ... , x_1) ~= P(x_t+1 | z_t+1) * P(z_t+1 | x_t, ... x_1)
 
-        Args:
-            z_t_given_t_sub_1 (MultivariateNormalFullCovariance): z_t|t-1
-            x_t (MultivariateNormalFullCovariance): x_t
+        Parameter
+        ---------
+            z_t_given_t_sub_1: tuple[Array, Array]
+                distribution for z_t|t-1
+            x_t: tuple[Array, Array]
+                distribution for x_t
 
         Returns:
             MultivariateNormalFullCovariance: z_t|t
@@ -133,7 +141,7 @@ class KalmanFilter:
         return jax.lax.cond(mask, lambda: z_t_given_t_sub_1, lambda: (mu, sigma))
     
     @staticmethod
-    def run_backward(p_dist, A, b, Q, H) -> tuple[Array, Array]:
+    def run_backward(p_dist: MVN_Type, A: Array, b: Array, Q: Array, H: Array) -> MVN_Type:
         """
         Run Kalman Filter backward pass on a sequence of distributions and return results
 
@@ -169,7 +177,7 @@ class KalmanFilter:
         return q_dist
     
     @staticmethod
-    def backward(carry, z_t: tuple[Array, Array], A, b, Q, H):
+    def backward(carry, z_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array):
         """
         Kalman Filter Smooth Step
         """

@@ -30,16 +30,16 @@ from lib.priors import KalmanFilter
 # jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
 # %%
-key = jnr.PRNGKey(42)
+key = jnr.PRNGKey(43)
 
-warmup_epochs = 125
-warmup_kl_weight = 0.1
+warmup_epochs = 75
+warmup_kl_weight = 0.005
 
 epochs = 500
 batch_size = 32
 latent_dims = 4
 
-kl_weight = 0.5
+kl_weight = 0.1
 kl_ramp = 30 # The epoch where the KL weight reaches its final value
 
 A_init_epsilon = 0.01
