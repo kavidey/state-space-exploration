@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 import jax.random as jnr
+from jax import Array
 
 from tensorflow_probability.substrates import jax as tfp
 
@@ -13,7 +14,7 @@ from dynamax.utils.plotting import plot_uncertainty_ellipses
 from dynamax.linear_gaussian_ssm import LinearGaussianSSM
 from dynamax.linear_gaussian_ssm import lgssm_smoother, lgssm_filter
 from lib.priors import KalmanFilter
-from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply
+from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply, MVN_Type
 
 jax.config.update("jax_enable_x64", True)
 # %% [markdown]
@@ -135,10 +136,10 @@ ax.plot(*x.T, ls="", **observation_marker_kwargs, color="tab:green", label="obse
 ax.plot(*xp.T, ls="", **observation_marker_kwargs, color="tab:green")
 
 nobs = 2
-zs = (jnp.stack((x, xp)), jnp.repeat(jnp.expand_dims(jnp.repeat(jnp.expand_dims(observation_noise, axis=0), timesteps, axis=0), axis=0), 2, axis=0))
-s = (jnp.array([5, 5]), initial_covariance)
-# s = (jnp.array([9.5, 2]), initial_covariance)
-ax.plot(*s[0], marker="s", color="tab:cyan", label="initial state")
+zs = (jnp.stack((x, xp), axis=1), jnp.reshape(jnp.repeat(jnp.expand_dims(observation_noise, axis=0), timesteps*nobs, axis=0), (timesteps, nobs, ndims, ndims)))
+q_1 = (jnp.array([5., 5.]), initial_covariance)
+# q_1 = (jnp.array([9.5, 2.]), initial_covariance)
+ax.plot(*q_1[0], marker="s", color="tab:cyan", label="initial state")
 ax.legend()
 
 def evaluate_observation(z_t, z_t_given_t_sub_1, H):
@@ -150,36 +151,33 @@ def evaluate_observation(z_t, z_t_given_t_sub_1, H):
 
     return z_t_given_t, w_k
 
-for t in range(timesteps):
-    z_t_given_t_sub_1 = KalmanFilter.predict(s, transition_matrix, jnp.zeros((ndims)), transition_noise)
-    # ax.scatter(*z_t_given_t_sub_1[0], color="tab:purple", label="ours")
-    # plot_uncertainty_ellipses(jnp.array([z_t_given_t_sub_1[0]]), jnp.array([z_t_given_t_sub_1[1]]), ax, **{"edgecolor": "tab:purple", "linewidth": 0.5, "label": "observations"})
+def kf_mot_forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array):
+    z_t_sub_1 = carry
 
-    w_s = jnp.zeros((nobs))
-    z_t_given_t_s = (jnp.zeros((nobs, ndims)), jnp.zeros((nobs, ndims, ndims)))
-    
-    
-    # for i in range(nobs):
-    #     z_t = (zs[0][i,t], zs[1][i, t])
-    #     z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, observation_matrix, mask=0)
-    #     # this is the same as the log likelihood calculation in KalmanFilter.forward
-    #     z_t_given_t_sub_1_x_space = (observation_matrix @ z_t_given_t_sub_1[0], observation_matrix @ z_t_given_t_sub_1[1] @ observation_matrix.T)
-    #     w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
+    # Prediction
+    z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
 
-    #     w_s = w_s.at[i].set(w_k)
-    #     z_t_given_t_s = (z_t_given_t_s[0].at[i].set(z_t_given_t[0]), z_t_given_t_s[1].at[i].set(z_t_given_t[1]))
+    # Update
+    # find GMM that best represents observations
+    z_t_given_t_s, w_ks = jax.vmap(lambda z_t: evaluate_observation(z_t, z_t_given_t_sub_1, observation_matrix))((x_t[0], x_t[1]))
+    w_ks = w_ks / w_ks.sum()
+    # approximate that with a single moment-matched gaussian
+    z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
 
-    #     ax.scatter(*z_t_given_t[0], marker="+", color="grey")
-    z_t_given_t_s, w_s = jax.vmap(lambda z_t: evaluate_observation(z_t, z_t_given_t_sub_1, observation_matrix))((zs[0][:, t], zs[1][:, t]))
-    ax.scatter(z_t_given_t_s[0][:, 0], z_t_given_t_s[0][:, 1], marker="+", color="grey")
-    
-    w_s = w_s / w_s.sum()
+    # Log-Likelihood
+    # project z_{t|t-1} into x (observation) space
+    z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+    # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+    log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t)[0]
 
-    z_t_given_t = GMM_moment_match(z_t_given_t_s, w_s)
+    return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
 
-    s = z_t_given_t
+kf_forward = lambda carry, x: kf_mot_forward(carry, x, transition_matrix, jnp.zeros(ndims), transition_noise, jnp.eye(ndims))
+_, result = jax.lax.scan(kf_forward, q_1, zs)
+q_dist, p_dist, log_likelihood = result
 
-    ax.scatter(*z_t_given_t[0], color="tab:red", label="ours")
-    # plot_uncertainty_ellipses(jnp.array([z_t_given_t[0]]), jnp.array([z_t_given_t[1]]), ax, **{"edgecolor": "tab:red", "linewidth": 0.5, "label": "observations"})
-# ax.legend()
+ax.scatter(*q_dist[0].T, color="tab:red", label="ours")
+plot_uncertainty_ellipses(*q_dist, ax, **{"edgecolor": "tab:red", "linewidth": 0.5})
+
+ax.legend()
 # %%
