@@ -393,61 +393,62 @@ print("A", restored_params["params"]["kf_A"])
 print("b", restored_params["params"]["kf_b"])
 print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %% LDS Reconstruction
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :pos_dims*num_balls*embedding_dim], jnp.zeros(sample_batch.shape[:2]), key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :-pos_dims], key)
 f, ax = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
 i = 0
+j = 0
 
-ax[0].imshow(sample_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[0].imshow(sample_batch[i,:,j].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[0].set_title('Sequence')
 
-ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+ax[1].imshow(recon[i,:,j].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist[0][i])
+ax[2].plot(q_dist[0][i,:,j])
 ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
+ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i,:,j]))
 ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 plt.show()
 # %%
 for j in range(num_balls):
-    plt.plot(sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j], sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j+1], c='black', linewidth=2)
-    plt.plot(recon[i,:,pos_dims*j], recon[i,:,pos_dims*j+1])
-plt.xlim(-5, 5)
-plt.ylim(-5, 5)
+    plt.plot(sample_batch[i,:,j, -pos_dims], sample_batch[i,:,j, -pos_dims+1], c='black', linewidth=2)
+    plt.plot(recon[i,:,j,0], recon[i,:,j,1])
+plt.xlim(-1, 1)
+plt.ylim(-1, 1)
 # %% LDS Imputation
-mask = jnp.zeros(sample_batch.shape[:2]).at[:, 20:30].set(1)
-masked_batch = sample_batch * jnp.logical_not(mask)[:, :, None]
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :pos_dims*num_balls*embedding_dim], mask, key)
+# mask = jnp.zeros(sample_batch.shape[:2]).at[:, 20:30].set(1)
+# masked_batch = sample_batch * jnp.logical_not(mask)[:, :, None]
+# recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :pos_dims*num_balls*embedding_dim], mask, key)
 
-f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
-f.tight_layout()
+# f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
+# f.tight_layout()
 
-ax[0].imshow(masked_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
-ax[0].set_title('Masked Sequence')
+# ax[0].imshow(masked_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+# ax[0].set_title('Masked Sequence')
 
-ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
-ax[1].set_title('Reconstruction')
+# ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
+# ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist[0][i])
-ax[2].set_title('Latent Posterior Mean')
+# ax[2].plot(q_dist[0][i])
+# ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
-ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
+# ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
+# ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
-ax[4].plot(z_recon[i])
-ax[4].set_title('Latent Posterior Samples')
+# ax[4].plot(z_recon[i])
+# ax[4].set_title('Latent Posterior Samples')
 
-plt.show()
+# plt.show()
 # %%
-masked_with_none = sample_batch.copy().at[jnp.nonzero(jnp.logical_not(mask))].set(jnp.nan)
+# masked_with_none = sample_batch.copy().at[jnp.nonzero(jnp.logical_not(mask))].set(jnp.nan)
 
-for j in range(num_balls):
-    plt.plot(masked_with_none[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j], masked_with_none[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j+1], c='grey', linewidth=6)
-    plt.plot(sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j], sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j+1], c='black', linewidth=2)
-    plt.plot(recon[i,:,pos_dims*j], recon[i,:,pos_dims*j+1])
-plt.xlim(-5, 5)
-plt.ylim(-5, 5)
+# for j in range(num_balls):
+#     plt.plot(masked_with_none[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j], masked_with_none[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j+1], c='grey', linewidth=6)
+#     plt.plot(sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j], sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j+1], c='black', linewidth=2)
+#     plt.plot(recon[i,:,pos_dims*j], recon[i,:,pos_dims*j+1])
+# plt.xlim(-5, 5)
+# plt.ylim(-5, 5)
 # %%
