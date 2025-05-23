@@ -128,7 +128,7 @@ def MVN_kl_divergence(mu_0: Array, sigma_0: Array, mu_1: Array, sigma_1: Array) 
     c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
     return 0.5 * (a + b - k + c)
 
-def GMM_moment_match(dists: Array, weights: Array) -> MVN_Type:
+def GMM_moment_match(dists: tuple[Array, Array], weights: Array) -> MVN_Type:
     ''' Finds a gaussian with moments matching a multivariate distribution
 
     Test cases:

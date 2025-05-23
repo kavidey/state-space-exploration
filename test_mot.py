@@ -13,7 +13,7 @@ from dynamax.utils.plotting import plot_uncertainty_ellipses
 from dynamax.linear_gaussian_ssm import LinearGaussianSSM
 from dynamax.linear_gaussian_ssm import lgssm_smoother, lgssm_filter
 from lib.priors import KalmanFilter
-from lib.distributions import MVN_kl_divergence, GMM_moment_match
+from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply
 
 jax.config.update("jax_enable_x64", True)
 # %% [markdown]
@@ -137,8 +137,8 @@ ax.plot(*xp.T, ls="", **observation_marker_kwargs, color="tab:green")
 add_cov = jax.vmap(lambda x: (x, observation_noise))
 nobs = 2
 zs = [add_cov(x), add_cov(xp)]
-s = (jnp.array([5, 5]), initial_covariance)
-# s = (jnp.array([9.5, 2]), initial_covariance)
+# s = (jnp.array([5, 5]), initial_covariance)
+s = (jnp.array([9.5, 2]), initial_covariance)
 ax.plot(*s[0], marker="s", color="tab:cyan", label="initial state")
 ax.legend()
 
@@ -154,14 +154,17 @@ for t in range(timesteps):
     for i in range(nobs):
         z_t = (zs[i][0][t], zs[i][1][t])
         z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, observation_matrix, mask=0)
-        w_k = MVN_kl_divergence(*z_t, *z_t_given_t)
+        # this is the same as the log likelihood calculation in KalmanFilter.forward
+        z_t_given_t_sub_1_x_space = (observation_matrix @ z_t_given_t_sub_1[0], observation_matrix @ z_t_given_t_sub_1[1] @ observation_matrix.T)
+        w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
 
         w_s = w_s.at[i].set(w_k)
         z_t_given_t_s = (z_t_given_t_s[0].at[i].set(z_t_given_t[0]), z_t_given_t_s[1].at[i].set(z_t_given_t[1]))
 
         ax.scatter(*z_t_given_t[0], marker="+", color="grey")
     
-    w_s = 1 - (w_s / w_s.sum())
+    w_s = w_s / w_s.sum()
+
     z_t_given_t = GMM_moment_match(z_t_given_t_s, w_s)
 
     s = z_t_given_t
