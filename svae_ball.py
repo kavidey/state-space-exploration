@@ -11,6 +11,7 @@ import torch
 
 import jax
 import jax.numpy as jnp
+from jax import Array
 
 import jax.random as jnr
 import numpy as np
@@ -26,7 +27,7 @@ tfb = tfp.bijectors
 # tfpk = tfp.math.psd_kernels
 
 from lib.distributions import MVN_kl_divergence
-from lib.priors import KalmanFilter
+from lib.priors import KalmanFilter_MOTPDA
 
 # jax.config.update("jax_debug_nans", True)
 # jax.config.update("jax_enable_x64", True)
@@ -67,7 +68,7 @@ test_dset = jnp.load(dataset_dir/"test.npz")
 # %%
 def get_embedding(pos, embedding_dim, n=1000):
     return jnp.sin(pos/n**(2*np.arange(embedding_dim)/embedding_dim))
-get_embedding_b = jax.vmap(get_embedding, (0, None, None))
+get_embedding_b = jax.vmap(jax.vmap(get_embedding, (0, None, None)), (0, None, None))
 
 for i in jnp.linspace(-10, 10, 20):
     plt.plot(get_embedding(i, 10, n=4))
@@ -82,39 +83,40 @@ if False:
         positions_sorted = []
         for j in range(positions.shape[0]):
             positions_sorted.append(
-                jnp.sort(jnp.concatenate((positions[j].reshape((3,2)), jnp.array([[1],[2],[3]])), axis=1),
-                         axis=0).flatten()
+                jnp.concatenate((
+                    jnp.reshape(
+                        get_embedding_b(positions[j].reshape((num_balls,2)), embedding_dim, 4),
+                        (num_balls, -1)),
+                    jnp.expand_dims(jnp.arange(num_balls), axis=-1)), axis=1)
             )
-        positions_sorted = jnp.array(positions_sorted)
+        positions_and_metadata = jnp.concatenate([jnp.reshape((positions-5)/5, (positions.shape[0], num_balls, 2)), jnp.repeat(jnp.arange(num_balls)[None, ..., None], positions.shape[0], axis=0)], axis=-1)
+        positions_sorted = jnp.concatenate([jnp.array(positions_sorted)] + [positions_and_metadata], axis=2)
 
-        p = positions_sorted
-        # p = positions
-
-        position_vec = jnp.hstack([get_embedding_b(p_, embedding_dim, 4) for p_ in p.T] + [p-5])
-        train.append(np.asarray(position_vec))
+        train.append(np.asarray(positions_sorted))
     
     train = np.array(train)
 
     for i in range(100):
         positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
         positions = positions[:, :2*num_balls]
+
         positions_sorted = []
         for j in range(positions.shape[0]):
             positions_sorted.append(
-                jnp.sort(jnp.concatenate((positions[j].reshape((3,2)), jnp.array([[1],[2],[3]])), axis=1),
-                         axis=0).flatten()
+                jnp.concatenate((
+                    jnp.reshape(
+                        get_embedding_b(positions[j].reshape((num_balls,2)), embedding_dim, 4),
+                        (num_balls, -1)),
+                    jnp.expand_dims(jnp.arange(num_balls), axis=-1)), axis=1)
             )
-        positions_sorted = jnp.array(positions_sorted)
+        positions_and_metadata = jnp.concatenate([jnp.reshape((positions-5)/5, (positions.shape[0], num_balls, 2)), jnp.repeat(jnp.arange(num_balls)[None, ..., None], positions.shape[0], axis=0)], axis=-1)
+        positions_sorted = jnp.concatenate([jnp.array(positions_sorted)] + [positions_and_metadata], axis=2)
 
-        p = positions_sorted
-        # p = positions
-
-        position_vec = jnp.hstack([get_embedding_b(p_, embedding_dim, 4) for p_ in p.T] + [p-5])
-        test.append(np.asarray(position_vec))
+        test.append(np.asarray(positions_sorted))
     test = np.array(test)
 
-    np.savez(dataset_dir / f"train_embedding_{num_balls}ball{'_sorted' if pos_sorted else ''}.npz", train)
-    np.savez(dataset_dir / f"test_embedding_{num_balls}ball{'_sorted' if pos_sorted else ''}.npz", test)
+    np.savez(dataset_dir / f"train_embedding_{num_balls}ball.npz", train)
+    np.savez(dataset_dir / f"test_embedding_{num_balls}ball.npz", test)
 # %%
 if False:
     train = []
@@ -161,8 +163,8 @@ if False:
     np.savez(dataset_dir / "train_embedding_straight.npz", train)
     np.savez(dataset_dir / "test_embedding_straight.npz", test)
 # %%
-train = np.load(dataset_dir/f"train_embedding_{num_balls}ball{'_sorted' if pos_sorted else ''}.npz")['arr_0']
-test = np.load(dataset_dir/f"test_embedding_{num_balls}ball{'_sorted' if pos_sorted else ''}.npz")['arr_0']
+train = np.load(dataset_dir/f"train_embedding_{num_balls}ball.npz")['arr_0']
+test = np.load(dataset_dir/f"test_embedding_{num_balls}ball.npz")['arr_0']
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
@@ -179,9 +181,9 @@ def initializer_diag_with_noise(epsilon: float):
         epsilon: noise factor
     
     Returns:
-        (jnr.PRNGKey, tuple) -> jnp.array
+        (Array, tuple) -> jnp.array
     '''
-    def initializer(rng: jnr.PRNGKey, shape):
+    def initializer(rng: Array, shape):
         # make sure its square
         assert shape[-1] == shape[-2]
         x = jnp.eye(shape[-1])
@@ -198,7 +200,7 @@ class Encoder(nn.Module):
     latent_dims: int
 
     @nn.compact
-    def __call__(self, x: jnp.array):
+    def __call__(self, x: Array):
         x = nn.Dense(20, name="enc_fc1")(x)
         x = nn.relu(x)
         xhat = nn.Dense(latent_dims, name="enc_fc2_xhat")(x)
@@ -209,38 +211,26 @@ class Encoder(nn.Module):
 
         return xhat, jax.vmap(jnp.diag)(sigma)
 
+Batched_Encoder = nn.vmap(Encoder, 
+    in_axes=0, out_axes=0,
+    variable_axes={'params': None},
+    split_rngs={'params': False}
+)
 
 class Decoder(nn.Module):
     @nn.compact
     def __call__(self, z):
         # z = nn.Dense(4, name="dec_fc1")(z)
         # z = nn.relu(z)
-        z = nn.Dense(num_balls*pos_dims, name="dec_fc2")(z)
+        z = nn.Dense(pos_dims, name="dec_fc2")(z)
         return z
-
-class VAE(nn.Module):
-    latent_dims: int
-
-    @nn.compact
-    def __call__(self, x, z_rng):
-        z = Encoder(latent_dims=self.latent_dims, name="encoder")(x)
-        z_sample = jnr.multivariate_normal(z_rng, z[0], z[1])
-        x_recon = Decoder(name="decoder")(z_sample)
-
-        return x_recon, z
-    
-Batched_VAE = nn.vmap(VAE, 
-    in_axes=0, out_axes=0,
-    variable_axes={'params': None},
-    split_rngs={'params': False}
-)
 
 class SVAE_LDS(nn.Module):
     latent_dims: int
 
     def setup(self):
         # Initialize VAE components
-        self.encoder = Encoder(latent_dims=self.latent_dims, name="encoder")
+        self.encoder = Batched_Encoder(latent_dims=self.latent_dims, name="encoder")
         self.decoder = Decoder(name="decoder")
 
         # Initialize Kalman Filter matrices
@@ -252,22 +242,23 @@ class SVAE_LDS(nn.Module):
             "kf_Q", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
         )
 
-    def __call__(self, x, mask, z_rng):
-        '''
-        mask should be 1 for masked items and 0 for available ones
-        '''
+    def __call__(self, x, z_rng):
         z_hat = self.encoder(x)
 
-        z_t_sub_1 = (
-            jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
-        )
+        z_t_sub_1 = (z_hat[0][0], z_hat[1][0])
 
-        f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims), mask=mask)
-        q_dist = KalmanFilter.run_backward(f_dist, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+        f_dist, q_dist, p_dist, marginal_loglik = jax.vmap(self.track_single_object, in_axes=(None, 0), out_axes=1)(z_hat, z_t_sub_1)
+
         z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)
 
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
+    
+    def track_single_object(self, z_hat, z_t_sub_1):
+        f_dist, p_dist, marginal_loglik = KalmanFilter_MOTPDA.run_forward(z_hat, z_t_sub_1, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+        q_dist = KalmanFilter_MOTPDA.run_backward(f_dist, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+
+        return f_dist, q_dist, p_dist, marginal_loglik
 
     def Q(self):
         return vec_to_cov_cholesky.forward(self.Q_param)
@@ -279,18 +270,18 @@ Batched_SVAE_LDS = nn.vmap(SVAE_LDS,
 )
 # %% LDS Train Code
 def create_train_step(
-    key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
+    key: Array, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch[..., :pos_dims*num_balls*embedding_dim], jnp.zeros(setup_batch.shape[:2]), jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
+    params = model.init(key, setup_batch[..., :-pos_dims], jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
-    def loss_fn(params, x, mask, key, kl_weight):
+    def loss_fn(params, x, key, kl_weight):
         bs = x.shape[0]
 
-        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :pos_dims*num_balls*embedding_dim], mask, jnr.split(key, x.shape[0]))
+        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :-pos_dims], jnr.split(key, x.shape[0])) # type: ignore
 
         def unbatched_loss(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik):
-            mse_loss = optax.l2_loss(recon, x[..., -pos_dims*num_balls:])
+            mse_loss = optax.l2_loss(recon, x[..., -pos_dims:])
             
             def observation_likelihood(z_hat, q_z, p_z):
                 k = z_hat[0].shape[-1]
@@ -303,16 +294,16 @@ def create_train_step(
             
             return mse_loss, kl_loss
         
-        losses = jax.vmap(unbatched_loss)(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik)
-        mse_loss = jnp.sum(losses[0]) / (bs * x.shape[1])
-        kl_loss = jnp.sum(losses[1]) / (bs * x.shape[1])
+        losses = jax.vmap(jax.vmap(unbatched_loss))(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik)
+        mse_loss = jnp.sum(losses[0]) / (bs * x.shape[1] * num_balls)
+        kl_loss = jnp.sum(losses[1]) / (bs * x.shape[1] * num_balls)
 
         loss = mse_loss + kl_loss * kl_weight
         return loss, (mse_loss, kl_loss)
 
     @jax.jit
-    def train_step(params, opt_state, x, mask, key, kl_weight):
-        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, mask, key, kl_weight)
+    def train_step(params, opt_state, x, key, kl_weight):
+        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key, kl_weight)
 
         loss, (mse_loss, kl_loss) = losses
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -350,7 +341,7 @@ for epoch in pbar:
 
         batch = process_batch(batch)
         params1, opt_state, loss, mse_loss, kl_loss = train_step(
-            params, opt_state, batch, jnp.zeros(batch.shape[:2]), subkey, min(epoch / kl_ramp, 1) * kl_weight
+            params, opt_state, batch, subkey, min(epoch / kl_ramp, 1) * kl_weight
         )
 
         contains_nan = False
@@ -388,8 +379,8 @@ restored_params = mngr.restore(mngr.latest_step(), params)
 
 def create_pred_step(model: nn.Module, params):
     @jax.jit
-    def pred_step(x, mask, key):
-        x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, mask, jnr.split(key, x.shape[0]))
+    def pred_step(x, key):
+        x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, jnr.split(key, x.shape[0]))
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
     
     return pred_step

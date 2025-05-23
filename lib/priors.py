@@ -230,17 +230,19 @@ class KalmanFilter_MOTPDA(KalmanFilter):
             q_dist, p_dist, log_likelihood
 
         """
-        kf_forward = lambda carry, xs: KalmanFilter_MOTPDA.forward(carry, xs, A, b, Q, H, 0)
+        kf_forward = lambda carry, x: KalmanFilter_MOTPDA.forward(carry, x, A, b, Q, H, 0)
 
         x_1 = (x[0][0], x[1][0])
-        q_1 = KalmanFilter_MOTPDA.update(z_t_sub_1,
+        q_1, w_k1 = KalmanFilter_MOTPDA.update(z_t_sub_1,
                                   x_1,
                                   H,
                                   0)
         p_1 = z_t_sub_1
 
+        # get the "effective" observation with moments matching the true GMM
+        x_1_effective = GMM_moment_match(x_1, w_k1)
         # p(x_1) = \int p(z_1) p(x_1|z_1) dz_1
-        log_likelihood1 = MVN_multiply(*x_1, *p_1)[0]
+        log_likelihood1 = MVN_multiply(*x_1_effective, *p_1)[0]
         
         if x[0].shape[0] > 1:
             _, result = jax.lax.scan(kf_forward, (q_1), (x[0][1:], x[1][1:]))
@@ -279,13 +281,15 @@ class KalmanFilter_MOTPDA(KalmanFilter):
         z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
 
         # Update
-        z_t_given_t = KalmanFilter_MOTPDA.update(z_t_given_t_sub_1, x_t, H)
+        z_t_given_t, w_ks = KalmanFilter_MOTPDA.update(z_t_given_t_sub_1, x_t, H)
 
         # Log-Likelihood
         # project z_{t|t-1} into x (observation) space
         z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+        # get the "effective" observation with moments matching the true GMM
+        x_t_effective = GMM_moment_match(x_t, w_ks)
         # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
-        log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t)[0]
+        log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t_effective)[0]
 
         return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
     
@@ -299,7 +303,7 @@ class KalmanFilter_MOTPDA(KalmanFilter):
         # approximate that with a single moment-matched gaussian
         z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
 
-        return z_t_given_t
+        return z_t_given_t, w_ks
     
     @staticmethod
     def evaluate_observation(z_t, z_t_given_t_sub_1, H):
