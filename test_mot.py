@@ -134,13 +134,21 @@ ax.plot(*z_[:, :2].T, marker="s", color="tab:blue", label="true state")
 ax.plot(*x.T, ls="", **observation_marker_kwargs, color="tab:green", label="observed")
 ax.plot(*xp.T, ls="", **observation_marker_kwargs, color="tab:green")
 
-add_cov = jax.vmap(lambda x: (x, observation_noise))
 nobs = 2
-zs = [add_cov(x), add_cov(xp)]
-# s = (jnp.array([5, 5]), initial_covariance)
-s = (jnp.array([9.5, 2]), initial_covariance)
+zs = (jnp.stack((x, xp)), jnp.repeat(jnp.expand_dims(jnp.repeat(jnp.expand_dims(observation_noise, axis=0), timesteps, axis=0), axis=0), 2, axis=0))
+s = (jnp.array([5, 5]), initial_covariance)
+# s = (jnp.array([9.5, 2]), initial_covariance)
 ax.plot(*s[0], marker="s", color="tab:cyan", label="initial state")
 ax.legend()
+
+def evaluate_observation(z_t, z_t_given_t_sub_1, H):
+    z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H, mask=0)
+    
+    # This is the same as the log likelihood calculation in KalmanFilter.forward
+    z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+    w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
+
+    return z_t_given_t, w_k
 
 for t in range(timesteps):
     z_t_given_t_sub_1 = KalmanFilter.predict(s, transition_matrix, jnp.zeros((ndims)), transition_noise)
@@ -151,17 +159,19 @@ for t in range(timesteps):
     z_t_given_t_s = (jnp.zeros((nobs, ndims)), jnp.zeros((nobs, ndims, ndims)))
     
     
-    for i in range(nobs):
-        z_t = (zs[i][0][t], zs[i][1][t])
-        z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, observation_matrix, mask=0)
-        # this is the same as the log likelihood calculation in KalmanFilter.forward
-        z_t_given_t_sub_1_x_space = (observation_matrix @ z_t_given_t_sub_1[0], observation_matrix @ z_t_given_t_sub_1[1] @ observation_matrix.T)
-        w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
+    # for i in range(nobs):
+    #     z_t = (zs[0][i,t], zs[1][i, t])
+    #     z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, observation_matrix, mask=0)
+    #     # this is the same as the log likelihood calculation in KalmanFilter.forward
+    #     z_t_given_t_sub_1_x_space = (observation_matrix @ z_t_given_t_sub_1[0], observation_matrix @ z_t_given_t_sub_1[1] @ observation_matrix.T)
+    #     w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
 
-        w_s = w_s.at[i].set(w_k)
-        z_t_given_t_s = (z_t_given_t_s[0].at[i].set(z_t_given_t[0]), z_t_given_t_s[1].at[i].set(z_t_given_t[1]))
+    #     w_s = w_s.at[i].set(w_k)
+    #     z_t_given_t_s = (z_t_given_t_s[0].at[i].set(z_t_given_t[0]), z_t_given_t_s[1].at[i].set(z_t_given_t[1]))
 
-        ax.scatter(*z_t_given_t[0], marker="+", color="grey")
+    #     ax.scatter(*z_t_given_t[0], marker="+", color="grey")
+    z_t_given_t_s, w_s = jax.vmap(lambda z_t: evaluate_observation(z_t, z_t_given_t_sub_1, observation_matrix))((zs[0][:, t], zs[1][:, t]))
+    ax.scatter(z_t_given_t_s[0][:, 0], z_t_given_t_s[0][:, 1], marker="+", color="grey")
     
     w_s = w_s / w_s.sum()
 
@@ -170,6 +180,6 @@ for t in range(timesteps):
     s = z_t_given_t
 
     ax.scatter(*z_t_given_t[0], color="tab:red", label="ours")
-    plot_uncertainty_ellipses(jnp.array([z_t_given_t[0]]), jnp.array([z_t_given_t[1]]), ax, **{"edgecolor": "tab:red", "linewidth": 0.5, "label": "observations"})
+    # plot_uncertainty_ellipses(jnp.array([z_t_given_t[0]]), jnp.array([z_t_given_t[1]]), ax, **{"edgecolor": "tab:red", "linewidth": 0.5, "label": "observations"})
 # ax.legend()
 # %%
