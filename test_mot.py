@@ -13,7 +13,7 @@ from dynamax.utils.plotting import plot_uncertainty_ellipses
 from dynamax.linear_gaussian_ssm import LinearGaussianSSM
 from dynamax.linear_gaussian_ssm import lgssm_smoother, lgssm_filter
 from lib.priors import KalmanFilter
-from lib.distributions import MVN_kl_divergence
+from lib.distributions import MVN_kl_divergence, GMM_moment_match
 
 jax.config.update("jax_enable_x64", True)
 # %% [markdown]
@@ -162,9 +162,7 @@ for t in range(timesteps):
         ax.scatter(*z_t_given_t[0], marker="+", color="grey")
     
     w_s = 1 - (w_s / w_s.sum())
-    mu = w_s @ z_t_given_t_s[0]
-    sigma = jnp.tensordot(w_s, z_t_given_t_s[1] + jnp.einsum("ki,kj->kij", mu - z_t_given_t_s[0], mu - z_t_given_t_s[0]), axes=(0,0))
-    z_t_given_t = (mu, sigma)
+    z_t_given_t = GMM_moment_match(z_t_given_t_s, w_s)
 
     s = z_t_given_t
 

@@ -103,3 +103,47 @@ def MVN_kl_divergence(mu_0, sigma_0, mu_1, sigma_1):
     b = mean_diff.T @ jnp.linalg.solve(sigma_1, mean_diff)
     c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
     return 0.5 * (a + b - k + c)
+
+def GMM_moment_match(dists, weights):
+    ''' Finds a gaussian with moments matching a multivariate distribution
+
+    Test cases:
+    ```python
+    from dynamax.utils.plotting import plot_uncertainty_ellipses
+    dists = (jnp.array([[-3], [3]]), jnp.array([[2], [2]]))
+    weights = jnp.array([0.5, 0.5])
+
+    # should be ([0], [11])
+    print(GMM_moment_match(dists, weights))
+
+
+    dist1 = (jnp.array([1, 0]), jnp.array([[1, 0], [0, 1]])*0.1)
+    dist2 = (jnp.array([-1, 0]), jnp.array([[1, 0], [0, 1]])*0.1)
+    weight = jnp.array([0.5, 0.5])
+
+    dist1 = (jnp.array([1, 1]), jnp.array([[1, 0], [0, 1]])*0.1)
+    dist2 = (jnp.array([-1, -1]), jnp.array([[1, 0], [0, 1]])*0.1)
+    weight = jnp.array([0.5, 0.5])
+
+    dist1 = (jnp.array([1, 1]), jnp.array([[1, 0], [0, 1]])*0.1)
+    dist2 = (jnp.array([-1, -1]), jnp.array([[1, 0], [0, 1]])*0.1)
+    weight = jnp.array([0.95, 0.05])
+
+    combined = GMM_moment_match((jnp.array([dist1[0], dist2[0]]), jnp.array([dist1[1], dist2[1]])), weight)
+
+    fig, ax = plt.subplots()
+    # plot_uncertainty_ellipses from dynamax.utils.plotting
+    plot_uncertainty_ellipses([dist1[0], dist2[0]], [dist1[1], dist2[1]], ax)
+    plot_uncertainty_ellipses([combined[0]], [combined[1]], ax, edgecolor='tab:red')
+
+    ax.set_xlim(-5,6)
+    ax.set_ylim(-5,6)
+    plt.show()
+    ```
+    '''
+    mu = weights @ dists[0]
+
+    mean_diff = mu - dists[0]
+    sigma = jnp.average(dists[1] + jax.vmap(jnp.outer)(mean_diff, mean_diff), weights=weights, axis=0)
+
+    return (mu, sigma)

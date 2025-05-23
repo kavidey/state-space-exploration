@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from jax import Array
 
 from lib.distributions import MVN_log_likelihood, MVN_multiply
 class KalmanFilter:
@@ -10,22 +11,22 @@ class KalmanFilter:
 
         Parameter
         ---------
-        z: tuple[jnp.array, jnp.array]
+        z: tuple[Array, Array]
             list of observations to run the filter on represented as (mean, covariance)
-        z_t_sub_1: tuple[jnp.array, jnp.array]
+        z_t_sub_1: tuple[Array, Array]
             prior on z[0] represented as (mean, covariance)
-        A: jnp.array
+        A: Array
             state transition matrix
-        b: jnp.array
+        b: Array
             state transition offset
-        Q: jnp.array
+        Q: Array
             process noise covariance matrix
-        H: jnp.array
+        H: Array
             observation matrix
 
         Returns
         -------
-        tuple[tuple[jnp.array, jnp.array], tuple[jnp.array, jnp.array], jnp.array]
+        tuple[tuple[Array, Array], tuple[Array, Array], Array]
             q_dist, p_dist, log_likelihood
 
         """
@@ -100,7 +101,7 @@ class KalmanFilter:
 
     @staticmethod
     def update(
-        z_t_given_t_sub_1: tuple[jnp.array, jnp.array], x_t: jnp.array, H: jnp.array, mask = 0
+        z_t_given_t_sub_1: tuple[Array, Array], x_t: Array, H: Array, mask = 0
     ):
         """
         Kalman filter update step
@@ -132,26 +133,26 @@ class KalmanFilter:
         return jax.lax.cond(mask, lambda: z_t_given_t_sub_1, lambda: (mu, sigma))
     
     @staticmethod
-    def run_backward(p_dist, A, b, Q, H) -> tuple[jnp.array, jnp.array]:
+    def run_backward(p_dist, A, b, Q, H) -> tuple[Array, Array]:
         """
         Run Kalman Filter backward pass on a sequence of distributions and return results
 
         Parameter
         ---------
-        p_dist: tuple[jnp.array, jnp.array]
+        p_dist: tuple[Array, Array]
             predicted state distribution represented as (mean, covariance)
-        A: jnp.array
+        A: Array
             state transition matrix
-        b: jnp.array
+        b: Array
             state transition offset
-        Q: jnp.array
+        Q: Array
             process noise covariance matrix
-        H: jnp.array
+        H: Array
             observation matrix
         
         Returns
         -------
-        q_dist: tuple[jnp.array, jnp.array]
+        q_dist: tuple[Array, Array]
             smoothed state distribution represented as (mean, covariance)
         """
         kf_backward = lambda carry, z_t: KalmanFilter.backward(carry, z_t, A, b, Q, H)
@@ -168,7 +169,7 @@ class KalmanFilter:
         return q_dist
     
     @staticmethod
-    def backward(carry, z_t: tuple[jnp.array, jnp.array], A, b, Q, H):
+    def backward(carry, z_t: tuple[Array, Array], A, b, Q, H):
         """
         Kalman Filter Smooth Step
         """
