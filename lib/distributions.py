@@ -2,6 +2,7 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 import jax.random as jnr
+from jax.experimental import checkify
 from jax import Array
 
 MVN_Type = tuple[Array, Array]
@@ -106,9 +107,53 @@ def MVN_multiply(m1: Array, c1: Array, m2: Array, c2: Array) -> tuple[float, MVN
 
     return c, (mean, cov)
 
+def MVN_inverse_bayes(prior: MVN_Type, posterior: MVN_Type):
+    '''
+    Determines the gaussian likelihood function given a gaussian posterior and prior
+
+    Derivation is simple using natural parameters
+
+    Parameter
+    ---------
+    prior: tuple[Array, Array]
+        gaussian prior function
+    posterior: tuple[Array, Array]
+        gaussian posterior function
+    
+    Returns
+    -------
+    tuple[Array, Array]
+        gaussian likelihood function
+    '''
+    # checkify.check(jnp.linalg.det(posterior[1]) < jnp.linalg.det(prior[1]), "Determinant of posterior covariance must be less than prior covariance")
+    # def compare_dets(d):
+    #     d1, d2 = d
+    #     assert d1 < d2, "Determinant of posterior covariance must be less than prior covariance"
+    # jax.experimental.io_callback(compare_dets, (jnp.linalg.det(posterior[1]), jnp.linalg.det(prior[1])))
+    # jax.debug.print("issue: {i}", i=jnp.linalg.det(posterior[1]) > jnp.linalg.det(prior[1]))
+    # \Sigma_l = (\Sigma_posterior^-1 - \Sigma_prior^-1)^-1
+    likelihood_sigma = jnp.linalg.inv(jnp.linalg.inv(posterior[1]) - jnp.linalg.inv(prior[1]))
+    # \mu_l = \Sigma_l @ (\Sigma_posterior^-1 @ \mu_posterior - \Sigma_prior^-1 @ \mu_prior)
+    likelihood_mu = likelihood_sigma @ (jnp.linalg.inv(posterior[1]) @ posterior[0] - jnp.linalg.inv(prior[1]) @ prior[0])
+    return (likelihood_mu, likelihood_sigma)
+
 def MVN_log_likelihood(mean: Array, cov: Array, x: Array) -> float:
     '''
     Calculates the likelihood of the observation under the gaussian distribution
+    
+
+    Parameter
+    ---------
+    mean: Array
+        mean of distribution
+    cov: Array
+        covariance of distribution
+    x: Array
+        observed sample
+    
+    Returns
+    ------
+    float: log likelihood of observing x under the distribution
     '''
     k = mean.shape[-1]
     mean_diff = mean - x
@@ -128,7 +173,7 @@ def MVN_kl_divergence(mu_0: Array, sigma_0: Array, mu_1: Array, sigma_1: Array) 
     c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
     return 0.5 * (a + b - k + c)
 
-def GMM_moment_match(dists: tuple[Array, Array], weights: Array) -> MVN_Type:
+def GMM_moment_match(dists: MVN_Type, weights: Array) -> MVN_Type:
     ''' Finds a gaussian with moments matching a multivariate distribution
 
     Test cases:

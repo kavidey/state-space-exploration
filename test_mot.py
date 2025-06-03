@@ -14,7 +14,7 @@ from dynamax.utils.plotting import plot_uncertainty_ellipses
 from dynamax.linear_gaussian_ssm import LinearGaussianSSM
 from dynamax.linear_gaussian_ssm import lgssm_smoother, lgssm_filter
 from lib.priors import KalmanFilter, KalmanFilter_MOTPDA
-from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply, MVN_Type
+from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply, MVN_Type, MVN_inverse_bayes
 
 jax.config.update("jax_enable_x64", True)
 # %% [markdown]
@@ -165,10 +165,11 @@ def kf_mot_forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array,
     z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
 
     # Log-Likelihood
-    # project z_{t|t-1} into x (observation) space
+    # project z_{t|t-1} and z_{t|t} into x (observation) space
     z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+    z_t_given_t_x_space = (H @ z_t_given_t[0], H @ z_t_given_t[1] @ H.T)
     # get the "effective" observation with moments matching the true GMM
-    x_t_effective = GMM_moment_match(x_t, w_ks)
+    x_t_effective = MVN_inverse_bayes(z_t_given_t_sub_1_x_space, z_t_given_t_x_space)
     # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
     log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t_effective)[0]
 
@@ -177,7 +178,7 @@ def kf_mot_forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array,
 kf_forward = lambda carry, x: kf_mot_forward(carry, x, transition_matrix, jnp.zeros(ndims), transition_noise, jnp.eye(ndims))
 _, result = jax.lax.scan(kf_forward, q_1, zs)
 q_dist, p_dist, log_likelihood = result
-q_dist, p_dist, log_likelihood = KalmanFilter_MOTPDA.run_forward(zs, q_1, transition_matrix, jnp.zeros(ndims), transition_noise, jnp.eye(ndims))
+# q_dist, p_dist, log_likelihood = KalmanFilter_MOTPDA.run_forward(zs, q_1, transition_matrix, jnp.zeros(ndims), transition_noise, jnp.eye(ndims))
 
 ax.scatter(*q_dist[0].T, color="tab:red", label="ours")
 plot_uncertainty_ellipses(*q_dist, ax, **{"edgecolor": "tab:red", "linewidth": 0.5})

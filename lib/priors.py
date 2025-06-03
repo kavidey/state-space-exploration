@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from lib.distributions import MVN_Type, MVN_log_likelihood, MVN_multiply, GMM_moment_match
+from lib.distributions import MVN_Type, MVN_log_likelihood, MVN_multiply, MVN_inverse_bayes, GMM_moment_match
 class KalmanFilter:
     @staticmethod
     def run_forward(x: MVN_Type, z_t_sub_1: MVN_Type, A: Array, b: Array, Q: Array, H: Array, mask):
@@ -239,10 +239,14 @@ class KalmanFilter_MOTPDA(KalmanFilter):
                                   0)
         p_1 = z_t_sub_1
 
+        # Log-Likelihood
+        # project z_{t|t-1} and z_{t|t} into x (observation) space
+        p_1_x_space = (H @ p_1[0], H @ p_1[1] @ H.T)
+        q_1_x_space = (H @ q_1[0], H @ q_1[1] @ H.T)
         # get the "effective" observation with moments matching the true GMM
-        x_1_effective = GMM_moment_match(x_1, w_k1)
-        # p(x_1) = \int p(z_1) p(x_1|z_1) dz_1
-        log_likelihood1 = MVN_multiply(*x_1_effective, *p_1)[0]
+        x_1_effective = MVN_inverse_bayes(p_1_x_space, q_1_x_space)
+        # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+        log_likelihood1 = MVN_multiply(*p_1_x_space, *x_1_effective)[0]
         
         if x[0].shape[0] > 1:
             _, result = jax.lax.scan(kf_forward, (q_1), (x[0][1:], x[1][1:]))
@@ -284,10 +288,11 @@ class KalmanFilter_MOTPDA(KalmanFilter):
         z_t_given_t, w_ks = KalmanFilter_MOTPDA.update(z_t_given_t_sub_1, x_t, H)
 
         # Log-Likelihood
-        # project z_{t|t-1} into x (observation) space
+        # project z_{t|t-1} and z_{t|t} into x (observation) space
         z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+        z_t_given_t_x_space = (H @ z_t_given_t[0], H @ z_t_given_t[1] @ H.T)
         # get the "effective" observation with moments matching the true GMM
-        x_t_effective = GMM_moment_match(x_t, w_ks)
+        x_t_effective = MVN_inverse_bayes(z_t_given_t_sub_1_x_space, z_t_given_t_x_space)
         # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
         log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t_effective)[0]
 

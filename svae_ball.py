@@ -29,7 +29,7 @@ tfb = tfp.bijectors
 from lib.distributions import MVN_kl_divergence
 from lib.priors import KalmanFilter_MOTPDA
 
-# jax.config.update("jax_debug_nans", True)
+jax.config.update("jax_debug_nans", True)
 # jax.config.update("jax_enable_x64", True)
 # jax.config.update('jax_platform_name', 'cpu')
 # %%
@@ -46,7 +46,7 @@ warmup_kl_weight = 0.01
 
 epochs = 200
 batch_size = 128
-latent_dims = num_balls*2*2
+latent_dims = 2*2
 
 kl_weight = 0.05
 kl_ramp = 5
