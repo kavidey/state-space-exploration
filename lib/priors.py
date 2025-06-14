@@ -106,7 +106,7 @@ class KalmanFilter:
 
     @staticmethod
     def update(
-        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, mask = 0
+        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, mask=0
     ):
         """
         Kalman filter update step
@@ -300,18 +300,20 @@ class KalmanFilter_MOTPDA(KalmanFilter):
     
     @staticmethod
     def update(
-        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, mask = 0
+        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, mask=0
     ):
         # find GMM that best represents observations
         z_t_given_t_s, w_ks = jax.vmap(lambda z_t: KalmanFilter_MOTPDA.evaluate_observation(z_t, z_t_given_t_sub_1, H))((x_t[0], x_t[1]))
+        w_ks = jnp.pow(w_ks, 5)
         w_ks = w_ks / w_ks.sum()
+        jax.debug.print("{x}", x=w_ks)
         # approximate that with a single moment-matched gaussian
         z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
 
         return z_t_given_t, w_ks
     
     @staticmethod
-    def evaluate_observation(z_t, z_t_given_t_sub_1, H):
+    def evaluate_observation(z_t: MVN_Type, z_t_given_t_sub_1: MVN_Type, H: Array):
         z_t_given_t = KalmanFilter.update(z_t_given_t_sub_1, z_t, H, mask=0)
         
         # This is the same as the log likelihood calculation in KalmanFilter.forward

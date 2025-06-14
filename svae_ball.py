@@ -30,7 +30,7 @@ from lib.distributions import MVN_kl_divergence
 from lib.priors import KalmanFilter_MOTPDA
 
 jax.config.update("jax_debug_nans", True)
-# jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", True)
 # jax.config.update('jax_platform_name', 'cpu')
 # %%
 dset_len = 1024
@@ -169,7 +169,7 @@ test = np.load(dataset_dir/f"test_embedding_{num_balls}ball.npz")['arr_0']
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
 
-process_batch = jnp.array
+process_batch = lambda x: jnp.array(x, dtype='float64')
 setup_batch = process_batch(next(iter(train_dataloader)))
 # %% Network Definitions
 def initializer_diag_with_noise(epsilon: float):
@@ -246,6 +246,7 @@ class SVAE_LDS(nn.Module):
         z_hat = self.encoder(x)
 
         z_t_sub_1 = (z_hat[0][0], z_hat[1][0])
+        z_hat = (z_hat[0][1:], z_hat[1][1:])
 
         f_dist, q_dist, p_dist, marginal_loglik = jax.vmap(self.track_single_object, in_axes=(None, 0), out_axes=1)(z_hat, z_t_sub_1)
 
@@ -279,7 +280,7 @@ def create_train_step(
         bs = x.shape[0]
 
         recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x[..., :-pos_dims], jnr.split(key, x.shape[0])) # type: ignore
-
+        x = x[:, 1:]
         def unbatched_loss(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik):
             mse_loss = optax.l2_loss(recon, x[..., -pos_dims:])
             
