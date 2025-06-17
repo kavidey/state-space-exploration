@@ -163,8 +163,16 @@ if False:
     np.savez(dataset_dir / "train_embedding_straight.npz", train)
     np.savez(dataset_dir / "test_embedding_straight.npz", test)
 # %%
-train = np.load(dataset_dir/f"train_embedding_{num_balls}ball.npz")['arr_0']
-test = np.load(dataset_dir/f"test_embedding_{num_balls}ball.npz")['arr_0']
+# train = np.load(dataset_dir/f"train_embedding_{num_balls}ball.npz")['arr_0']
+# test = np.load(dataset_dir/f"test_embedding_{num_balls}ball.npz")['arr_0']
+train = jnp.concat([train_dset['y'][:1024, ..., :2]]*2, axis=-1)
+test = jnp.concat([test_dset['y'][:1024, ..., :2]]*2, axis=-1)
+latent_dims = 4
+pos_dims = 2
+num_balls=1
+
+train = train[:, :, :2]
+test = test[:, :, :2]
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
@@ -201,8 +209,8 @@ class Encoder(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array):
-        x = nn.Dense(20, name="enc_fc1")(x)
-        x = nn.relu(x)
+        # x = nn.Dense(20, name="enc_fc1")(x)
+        # x = nn.relu(x)
         xhat = nn.Dense(latent_dims, name="enc_fc2_xhat")(x)
 
         # learning logvar = log(sigma^2) ensures that sigma is positive and helps with learning small numbers
@@ -417,8 +425,8 @@ plt.show()
 for j in range(num_balls):
     plt.plot(sample_batch[i,:,j, -pos_dims], sample_batch[i,:,j, -pos_dims+1], c='black', linewidth=2)
     plt.plot(recon[i,:,j,0], recon[i,:,j,1])
-plt.xlim(-1, 1)
-plt.ylim(-1, 1)
+# plt.xlim(-1, 1)
+# plt.ylim(-1, 1)
 # %% LDS Imputation
 # mask = jnp.zeros(sample_batch.shape[:2]).at[:, 20:30].set(1)
 # masked_batch = sample_batch * jnp.logical_not(mask)[:, :, None]
