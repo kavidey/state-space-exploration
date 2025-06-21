@@ -39,7 +39,7 @@ num_balls = 3
 pos_sorted = True
 pos_dims = 2 + pos_sorted
 
-key = jnr.PRNGKey(42)
+key = jnr.PRNGKey(43)
 
 warmup_epochs = 30
 warmup_kl_weight = 0.01
@@ -169,7 +169,7 @@ train = jnp.concat([train_dset['y'][:1024, ..., :2]]*2, axis=-1)
 test = jnp.concat([test_dset['y'][:1024, ..., :2]]*2, axis=-1)
 latent_dims = 4
 pos_dims = 2
-num_balls=1
+num_balls = 2
 
 train = train[:, :, :2]
 test = test[:, :, :2]
@@ -256,7 +256,9 @@ class SVAE_LDS(nn.Module):
         z_t_sub_1 = (z_hat[0][0], z_hat[1][0])
         z_hat = (z_hat[0][1:], z_hat[1][1:])
 
-        f_dist, q_dist, p_dist, marginal_loglik = jax.vmap(self.track_single_object, in_axes=(None, 0), out_axes=1)(z_hat, z_t_sub_1)
+        f_dist, q_dist, p_dist, marginal_loglik = jax.vmap(self.track_single_object, in_axes=(None, 0), out_axes=1)(z_hat, (z_t_sub_1[0][:1], z_t_sub_1[1][:1]))
+        # f_dist, q_dist, p_dist, marginal_loglik = jax.vmap(self.track_single_object, in_axes=(None, 0), out_axes=1)(z_hat, z_t_sub_1)
+        # f_dist, q_dist, p_dist, marginal_loglik = self.track_single_object(z_hat, (z_t_sub_1[0][0], z_t_sub_1[1][0]))
 
         z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)
@@ -299,11 +301,11 @@ def create_train_step(
                 inv_cov = jnp.linalg.inv(z_hat[1])
                 return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat[1])) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z[1] @ inv_cov))
             
-            kl_loss = jax.vmap(observation_likelihood)(z_hat, q_dist, p_dist) - marginal_loglik
+            kl_loss = jax.vmap(observation_likelihood)((z_hat[0][:1], z_hat[1][:1]), q_dist, p_dist) - marginal_loglik
             
             return mse_loss, kl_loss
-        
-        losses = jax.vmap(jax.vmap(unbatched_loss))(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik)
+
+        losses = jax.vmap(jax.vmap(unbatched_loss))(x[..., :1, :], recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik)
         mse_loss = jnp.sum(losses[0]) / (bs * x.shape[1] * num_balls)
         kl_loss = jnp.sum(losses[1]) / (bs * x.shape[1] * num_balls)
 
@@ -461,3 +463,15 @@ for j in range(num_balls):
 # plt.xlim(-5, 5)
 # plt.ylim(-5, 5)
 # %%
+# z_hat = self.encoder(x)
+
+# z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
+# x_recon = self.decoder(z_recon)
+
+x = sample_batch
+z_hat = model.encoder(x)
+
+z_t_sub_1 = (z_hat[0][0], z_hat[1][0])
+z_hat = (z_hat[0][1:], z_hat[1][1:])
+
+model.track_single_object(z_hat[:, :, 0], z_t_sub_1[:, :, 0])

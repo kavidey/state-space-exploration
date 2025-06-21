@@ -243,6 +243,7 @@ class KalmanFilter_MOTPDA(KalmanFilter):
         # project z_{t|t-1} and z_{t|t} into x (observation) space
         p_1_x_space = (H @ p_1[0], H @ p_1[1] @ H.T)
         q_1_x_space = (H @ q_1[0], H @ q_1[1] @ H.T)
+        # jax.debug.print("{w} {x} {y}", w=x_1, x=p_1_x_space, y=q_1_x_space)
         # get the "effective" observation with moments matching the true GMM
         x_1_effective = MVN_inverse_bayes(p_1_x_space, q_1_x_space)
         # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
@@ -304,10 +305,11 @@ class KalmanFilter_MOTPDA(KalmanFilter):
     ):
         # find GMM that best represents observations
         z_t_given_t_s, w_ks = jax.vmap(lambda z_t: KalmanFilter_MOTPDA.evaluate_observation(z_t, z_t_given_t_sub_1, H))((x_t[0], x_t[1]))
-        jax.debug.print("{x} {y}", x=w_ks, y=w_ks / w_ks.sum())
-        # w_ks = jnp.pow(w_ks, 5)
-        w_ks = w_ks / w_ks.sum()
+        # jax.debug.print("{x} {y}", x=w_ks, y=w_ks / w_ks.sum())
+        # w_ks = jnp.pow(w_ks, 2)
+        # w_ks = w_ks / jax.lax.stop_gradient(w_ks.sum())
         # w_ks = jnp.ones_like(w_ks)
+        w_ks = jnp.array([1.0, 0.0])
         # approximate that with a single moment-matched gaussian
         z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
 

@@ -125,16 +125,14 @@ def MVN_inverse_bayes(prior: MVN_Type, posterior: MVN_Type):
     tuple[Array, Array]
         gaussian likelihood function
     '''
-    # checkify.check(jnp.linalg.det(posterior[1]) < jnp.linalg.det(prior[1]), "Determinant of posterior covariance must be less than prior covariance")
-    # def compare_dets(d):
-    #     d1, d2 = d
-    #     assert d1 < d2, "Determinant of posterior covariance must be less than prior covariance"
-    # jax.experimental.io_callback(compare_dets, (jnp.linalg.det(posterior[1]), jnp.linalg.det(prior[1])))
-    # jax.debug.print("issue: {i}", i=jnp.linalg.det(posterior[1]) > jnp.linalg.det(prior[1]))
+    # if \Sigma_posterior^-1 - \Sigma_prior^-1 is not positive semidefinite then this is an invalid covariance matrix
+    issue = jnp.any(jnp.isnan(jnp.linalg.cholesky(jnp.linalg.inv(posterior[1]) - jnp.linalg.inv(prior[1]))))
+
     # \Sigma_l = (\Sigma_posterior^-1 - \Sigma_prior^-1)^-1
     likelihood_sigma = jnp.linalg.inv(jnp.linalg.inv(posterior[1]) - jnp.linalg.inv(prior[1]))
     # \mu_l = \Sigma_l @ (\Sigma_posterior^-1 @ \mu_posterior - \Sigma_prior^-1 @ \mu_prior)
     likelihood_mu = likelihood_sigma @ (jnp.linalg.inv(posterior[1]) @ posterior[0] - jnp.linalg.inv(prior[1]) @ prior[0])
+    
     return (likelihood_mu, likelihood_sigma)
 
 def MVN_log_likelihood(mean: Array, cov: Array, x: Array) -> float:
