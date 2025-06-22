@@ -305,11 +305,15 @@ class KalmanFilter_MOTPDA(KalmanFilter):
     ):
         # find GMM that best represents observations
         z_t_given_t_s, w_ks = jax.vmap(lambda z_t: KalmanFilter_MOTPDA.evaluate_observation(z_t, z_t_given_t_sub_1, H))((x_t[0], x_t[1]))
-        # jax.debug.print("{x} {y}", x=w_ks, y=w_ks / w_ks.sum())
-        # w_ks = jnp.pow(w_ks, 2)
-        # w_ks = w_ks / jax.lax.stop_gradient(w_ks.sum())
-        # w_ks = jnp.ones_like(w_ks)
-        w_ks = jnp.array([1.0, 0.0])
+        # normalize list to fix underflow issues
+        w_ks = w_ks - jnp.max(w_ks) # jax.lax.stop_gradient(jnp.max(w_ks))
+        # sharpen
+        w_ks = w_ks * 100
+        # move out of log space
+        w_ks = jnp.exp(w_ks)
+        
+        w_ks = w_ks / w_ks.sum() # jax.lax.stop_gradient(w_ks.sum())
+        
         # approximate that with a single moment-matched gaussian
         z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)
 
@@ -321,6 +325,6 @@ class KalmanFilter_MOTPDA(KalmanFilter):
         
         # This is the same as the log likelihood calculation in KalmanFilter.forward
         z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
-        w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
+        w_k = MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0]
 
         return z_t_given_t, w_k

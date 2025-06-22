@@ -171,14 +171,20 @@ latent_dims = 4
 pos_dims = 2
 num_balls = 2
 
-train = train[:, :, :2]
-test = test[:, :, :2]
+key, tmpkey = jnr.split(key)
+train = jnp.concat((train[:, :, :1], train[:, :, :1] + jnr.normal(tmpkey, train[:, :, :1].shape) * 0.05), axis=2)
+key, tmpkey = jnr.split(key)
+test = jnp.concat((test[:, :, :1], test[:, :, :1] + jnr.normal(tmpkey, test[:, :, :1].shape) * 0.05), axis=2)
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
 
 process_batch = lambda x: jnp.array(x, dtype='float64')
 setup_batch = process_batch(next(iter(train_dataloader)))
+# %%
+i = 0
+for j in range(num_balls):
+    plt.scatter(setup_batch[i,:,j, -pos_dims], setup_batch[i,:,j, -pos_dims+1])
 # %% Network Definitions
 def initializer_diag_with_noise(epsilon: float):
     '''
