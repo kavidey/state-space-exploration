@@ -172,9 +172,11 @@ pos_dims = 2
 num_balls = 2
 
 key, tmpkey = jnr.split(key)
-train = jnp.concat((train[:, :, :1], train[:, :, :1] + jnr.normal(tmpkey, train[:, :, :1].shape) * 0.05), axis=2)
+train = jnp.concat((train[:, :, :1], train[:, :, :1]), axis=2)
+train += jnr.normal(tmpkey, train.shape) * 0.05
 key, tmpkey = jnr.split(key)
-test = jnp.concat((test[:, :, :1], test[:, :, :1] + jnr.normal(tmpkey, test[:, :, :1].shape) * 0.05), axis=2)
+test = jnp.concat((test[:, :, :1], test[:, :, :1]), axis=2)
+test += jnr.normal(tmpkey, test.shape) * 0.05
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
@@ -431,7 +433,7 @@ ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 plt.show()
 # %%
 for j in range(num_balls):
-    plt.plot(sample_batch[i,:,j, -pos_dims], sample_batch[i,:,j, -pos_dims+1], c='black', linewidth=2)
+    plt.scatter(sample_batch[i,:,j, -pos_dims], sample_batch[i,:,j, -pos_dims+1], c='black')
     plt.plot(recon[i,:,j,0], recon[i,:,j,1])
 # plt.xlim(-1, 1)
 # plt.ylim(-1, 1)
