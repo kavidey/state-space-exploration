@@ -307,14 +307,15 @@ class KalmanFilter_MOTPDA(KalmanFilter):
         z_t_given_t_s, w_ks = jax.vmap(lambda z_t: KalmanFilter_MOTPDA.evaluate_observation(z_t, z_t_given_t_sub_1, H))(x_t)
         # normalize list to fix underflow issues
         w_ks = w_ks - jnp.max(w_ks) # jax.lax.stop_gradient(jnp.max(w_ks))
+        # jax.debug.print("{x}", x=w_ks)
         # sharpen
-        w_ks = w_ks * 100
+        w_ks = w_ks * 10
         # move out of log space
         w_ks = jnp.exp(w_ks)
         
-        # jax.debug.print("{x} {y}", x=w_ks, y=w_ks / w_ks.sum())
-        w_ks = jnp.array([1, 0])
+        # w_ks = jnp.array([1, 0]) # hardcode to always use the first observation
 
+        # jax.debug.print("{x} {y}", x=w_ks, y=w_ks / w_ks.sum())
         w_ks = w_ks / w_ks.sum() # jax.lax.stop_gradient(w_ks.sum())
         
         # approximate that with a single moment-matched gaussian

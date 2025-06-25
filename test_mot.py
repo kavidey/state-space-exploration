@@ -147,7 +147,7 @@ def evaluate_observation(z_t, z_t_given_t_sub_1, H):
     
     # This is the same as the log likelihood calculation in KalmanFilter.forward
     z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
-    w_k = jnp.exp(MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0])
+    w_k = MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0]
 
     return z_t_given_t, w_k
 
@@ -160,7 +160,11 @@ def kf_mot_forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array,
     # Update
     # find GMM that best represents observations
     z_t_given_t_s, w_ks = jax.vmap(lambda z_t: evaluate_observation(z_t, z_t_given_t_sub_1, observation_matrix))((x_t[0], x_t[1]))
-    w_ks = jnp.pow(w_ks, 10)
+    w_ks = w_ks - jnp.max(w_ks)
+    # sharpen
+    w_ks = w_ks * 10
+    # move out of log space
+    w_ks = jnp.exp(w_ks)
     w_ks = w_ks / w_ks.sum()
     # approximate that with a single moment-matched gaussian
     z_t_given_t = GMM_moment_match(z_t_given_t_s, w_ks)

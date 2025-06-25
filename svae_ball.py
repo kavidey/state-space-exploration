@@ -1,4 +1,4 @@
-# %%
+# %% Imports
 import time
 from typing import Tuple
 from pathlib import Path
@@ -32,22 +32,15 @@ from lib.priors import KalmanFilter_MOTPDA
 jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
 # jax.config.update('jax_platform_name', 'cpu')
-# %%
+# %% Configuration
 dset_len = 1024
-embedding_dim = 10
-num_balls = 3
-pos_sorted = True
-pos_dims = 2 + pos_sorted
+epochs = 200
+batch_size = 128
 
 key = jnr.PRNGKey(43)
 
 warmup_epochs = 30
 warmup_kl_weight = 0.01
-
-epochs = 200
-batch_size = 128
-latent_dims = 2*2
-
 kl_weight = 0.05
 kl_ramp = 5
 
@@ -66,127 +59,35 @@ dataset_dir = Path("dataset") / "billiard"
 train_dset = jnp.load(dataset_dir/"train.npz")
 test_dset = jnp.load(dataset_dir/"test.npz")
 # %%
-def get_embedding(pos, embedding_dim, n=1000):
-    return jnp.sin(pos/n**(2*np.arange(embedding_dim)/embedding_dim))
-get_embedding_b = jax.vmap(jax.vmap(get_embedding, (0, None, None)), (0, None, None))
-
-for i in jnp.linspace(-10, 10, 20):
-    plt.plot(get_embedding(i, 10, n=4))
-# %%
-if False:
-    train = []
-    test = []
-    for i in range(dset_len):
-        positions = jnp.reshape(train_dset['y'][i][..., :2], (-1, 6))
-        positions = positions[:, :2*num_balls]
-        
-        positions_sorted = []
-        for j in range(positions.shape[0]):
-            positions_sorted.append(
-                jnp.concatenate((
-                    jnp.reshape(
-                        get_embedding_b(positions[j].reshape((num_balls,2)), embedding_dim, 4),
-                        (num_balls, -1)),
-                    jnp.expand_dims(jnp.arange(num_balls), axis=-1)), axis=1)
-            )
-        positions_and_metadata = jnp.concatenate([jnp.reshape((positions-5)/5, (positions.shape[0], num_balls, 2)), jnp.repeat(jnp.arange(num_balls)[None, ..., None], positions.shape[0], axis=0)], axis=-1)
-        positions_sorted = jnp.concatenate([jnp.array(positions_sorted)] + [positions_and_metadata], axis=2)
-
-        train.append(np.asarray(positions_sorted))
-    
-    train = np.array(train)
-
-    for i in range(100):
-        positions = jnp.reshape(test_dset['y'][i][..., :2], (-1, 6))
-        positions = positions[:, :2*num_balls]
-
-        positions_sorted = []
-        for j in range(positions.shape[0]):
-            positions_sorted.append(
-                jnp.concatenate((
-                    jnp.reshape(
-                        get_embedding_b(positions[j].reshape((num_balls,2)), embedding_dim, 4),
-                        (num_balls, -1)),
-                    jnp.expand_dims(jnp.arange(num_balls), axis=-1)), axis=1)
-            )
-        positions_and_metadata = jnp.concatenate([jnp.reshape((positions-5)/5, (positions.shape[0], num_balls, 2)), jnp.repeat(jnp.arange(num_balls)[None, ..., None], positions.shape[0], axis=0)], axis=-1)
-        positions_sorted = jnp.concatenate([jnp.array(positions_sorted)] + [positions_and_metadata], axis=2)
-
-        test.append(np.asarray(positions_sorted))
-    test = np.array(test)
-
-    np.savez(dataset_dir / f"train_embedding_{num_balls}ball.npz", train)
-    np.savez(dataset_dir / f"test_embedding_{num_balls}ball.npz", test)
-# %%
-if False:
-    train = []
-    test = []
-    for i in range(dset_len):
-        key, tmp_key = jnr.split(key)
-        start_stop = jnr.uniform(tmp_key, (num_balls, 2, 2)) * 10 - 5
-
-        positions = []
-        for i in range(num_balls):
-            positions.extend([
-                jnp.linspace(start_stop[i, 0, 0], start_stop[i, 1, 0]), # x
-                jnp.linspace(start_stop[i, 0, 1], start_stop[i, 1, 1]), # y
-            ])
-        positions = np.array(positions)
-
-        position_vec = jnp.hstack([
-            get_embedding_b(p, embedding_dim, 4) for p in positions
-        ] + [positions.T])
-
-        train.append(np.asarray(position_vec))
-
-    for i in range(100):
-        key, tmp_key = jnr.split(key)
-        start_stop = jnr.uniform(tmp_key, (num_balls, 2, 2)) * 10 - 5
-
-        positions = []
-        for i in range(num_balls):
-            positions.extend([
-                jnp.linspace(start_stop[i, 0, 0], start_stop[i, 1, 0]), # x
-                jnp.linspace(start_stop[i, 0, 1], start_stop[i, 1, 1]), # y
-            ])
-        positions = np.array(positions)
-
-        position_vec = jnp.hstack([
-            get_embedding_b(p, embedding_dim, 4) for p in positions
-        ] + [positions.T])
-
-        test.append(np.asarray(position_vec))
-
-    train = np.array(train)
-    test = np.array(test)
-
-    np.savez(dataset_dir / "train_embedding_straight.npz", train)
-    np.savez(dataset_dir / "test_embedding_straight.npz", test)
-# %%
-# train = np.load(dataset_dir/f"train_embedding_{num_balls}ball.npz")['arr_0']
-# test = np.load(dataset_dir/f"test_embedding_{num_balls}ball.npz")['arr_0']
+# Only use one ball with two observations per timestep
 train = jnp.concat([train_dset['y'][:1024, ..., :2]]*2, axis=-1)
 test = jnp.concat([test_dset['y'][:1024, ..., :2]]*2, axis=-1)
 latent_dims = 4
 pos_dims = 2
 num_balls = 2
 
+noise_amt = 0.15
 key, tmpkey = jnr.split(key)
 train = jnp.concat((train[:, :, :1], train[:, :, :1]), axis=2)
-train += jnr.normal(tmpkey, train.shape) * 0.05
+train += jnr.normal(tmpkey, train.shape) * noise_amt
 key, tmpkey = jnr.split(key)
 test = jnp.concat((test[:, :, :1], test[:, :, :1]), axis=2)
-test += jnr.normal(tmpkey, test.shape) * 0.05
+test += jnr.normal(tmpkey, test.shape) * noise_amt
+
+train = train/5-1
+test = test/5-1
 
 train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
 
 process_batch = lambda x: jnp.array(x, dtype='float64')
 setup_batch = process_batch(next(iter(train_dataloader)))
-# %%
+
 i = 0
 for j in range(num_balls):
     plt.scatter(setup_batch[i,:,j, -pos_dims], setup_batch[i,:,j, -pos_dims+1])
+plt.xlim(-1, 1)
+plt.ylim(-1, 1)
 # %% Network Definitions
 def initializer_diag_with_noise(epsilon: float):
     '''
@@ -263,10 +164,9 @@ class SVAE_LDS(nn.Module):
 
         z_t_sub_1 = (z_hat[0][0], z_hat[1][0])
         z_hat = (z_hat[0][1:], z_hat[1][1:])
-
+        
         f_dist, q_dist, p_dist, marginal_loglik = jax.vmap(self.track_single_object, in_axes=(None, 0), out_axes=1)(z_hat, (z_t_sub_1[0][:1], z_t_sub_1[1][:1]))
         # f_dist, q_dist, p_dist, marginal_loglik = jax.vmap(self.track_single_object, in_axes=(None, 0), out_axes=1)(z_hat, z_t_sub_1)
-        # f_dist, q_dist, p_dist, marginal_loglik = self.track_single_object(z_hat, (z_t_sub_1[0][0], z_t_sub_1[1][0]))
 
         z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)
@@ -337,7 +237,6 @@ key, model_key = jnr.split(key)
 
 model = Batched_SVAE_LDS(latent_dims=latent_dims)
 optimizer = optax.adam(learning_rate=1e-3)
-# optimizer = optax.sgd(learning_rate=1e-3)
 
 train_step, params, opt_state = create_train_step(model_key, model, optimizer)
 # %% Print LDS Parameters
@@ -435,51 +334,6 @@ plt.show()
 for j in range(num_balls):
     plt.scatter(sample_batch[i,:,j, -pos_dims], sample_batch[i,:,j, -pos_dims+1], c='black')
     plt.plot(recon[i,:,j,0], recon[i,:,j,1])
-# plt.xlim(-1, 1)
-# plt.ylim(-1, 1)
-# %% LDS Imputation
-# mask = jnp.zeros(sample_batch.shape[:2]).at[:, 20:30].set(1)
-# masked_batch = sample_batch * jnp.logical_not(mask)[:, :, None]
-# recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch[..., :pos_dims*num_balls*embedding_dim], mask, key)
-
-# f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
-# f.tight_layout()
-
-# ax[0].imshow(masked_batch[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
-# ax[0].set_title('Masked Sequence')
-
-# ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
-# ax[1].set_title('Reconstruction')
-
-# ax[2].plot(q_dist[0][i])
-# ax[2].set_title('Latent Posterior Mean')
-
-# ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
-# ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
-
-# ax[4].plot(z_recon[i])
-# ax[4].set_title('Latent Posterior Samples')
-
-# plt.show()
+plt.xlim(-1, 1)
+plt.ylim(-1, 1)
 # %%
-# masked_with_none = sample_batch.copy().at[jnp.nonzero(jnp.logical_not(mask))].set(jnp.nan)
-
-# for j in range(num_balls):
-#     plt.plot(masked_with_none[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j], masked_with_none[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j+1], c='grey', linewidth=6)
-#     plt.plot(sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j], sample_batch[i,:,pos_dims*num_balls*embedding_dim+pos_dims*j+1], c='black', linewidth=2)
-#     plt.plot(recon[i,:,pos_dims*j], recon[i,:,pos_dims*j+1])
-# plt.xlim(-5, 5)
-# plt.ylim(-5, 5)
-# %%
-# z_hat = self.encoder(x)
-
-# z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
-# x_recon = self.decoder(z_recon)
-
-x = sample_batch
-z_hat = model.encoder(x)
-
-z_t_sub_1 = (z_hat[0][0], z_hat[1][0])
-z_hat = (z_hat[0][1:], z_hat[1][1:])
-
-model.track_single_object(z_hat[:, :, 0], z_t_sub_1[:, :, 0])

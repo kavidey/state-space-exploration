@@ -208,8 +208,10 @@ def GMM_moment_match(dists: MVN_Type, weights: Array) -> MVN_Type:
     plt.show()
     ```
     '''
+    # \mu = \Sum w_{k,i} mu_i
     mu = weights @ dists[0]
 
+    # \Sigma = \Sum w_{k,i} * (\Sigma_i + (\mu - \mu_i) @ (\mu - \mu_i)^T)
     mean_diff = mu - dists[0]
     sigma = jnp.average(dists[1] + jax.vmap(jnp.outer)(mean_diff, mean_diff), weights=weights, axis=0)
 
