@@ -332,3 +332,126 @@ class KalmanFilter_MOTPDA(KalmanFilter):
         w_k = MVN_multiply(*z_t_given_t_sub_1_x_space, *z_t)[0]
 
         return z_t_given_t, w_k
+
+class KalmanFilter_MOTCAVI(KalmanFilter):
+    @staticmethod
+    def run_forward(x: MVN_Type, z_t_sub_1: MVN_Type, A: Array, b: Array, Q: Array, H: Array, beta, mask=None):
+        """
+        Run Kalman Filter forward pass on a sequence of distributions and return results
+
+        Parameter
+        ---------
+        x: tuple[Array, Array]
+            list of observations to run the filter on represented as (mean, covariance)
+        z_t_sub_1: tuple[Array, Array]
+            prior on z[0] represented as (mean, covariance)
+        A: Array
+            state transition matrix
+        b: Array
+            state transition offset
+        Q: Array
+            process noise covariance matrix
+        H: Array
+            observation matrix
+        mask: None
+            unused
+
+        Returns
+        -------
+        tuple[tuple[Array, Array], tuple[Array, Array], Array]
+            q_dist, p_dist, log_likelihood
+
+        """
+        kf_forward = lambda carry, x: KalmanFilter_MOTCAVI.forward(carry, x, A, b, Q, H, beta, 0)
+
+        x_1 = (x[0][0], x[1][0])
+        q_1, w_k1 = KalmanFilter_MOTCAVI.update(z_t_sub_1,
+                                  x_1,
+                                  H,
+                                  0)
+        p_1 = z_t_sub_1
+
+        # Log-Likelihood
+        # project z_{t|t-1} and z_{t|t} into x (observation) space
+        p_1_x_space = (H @ p_1[0], H @ p_1[1] @ H.T)
+        q_1_x_space = (H @ q_1[0], H @ q_1[1] @ H.T)
+
+        # get the "effective" observation with moments matching the true GMM
+        x_1_effective = MVN_inverse_bayes(p_1_x_space, q_1_x_space)
+        # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+        log_likelihood1 = MVN_multiply(*p_1_x_space, *x_1_effective)[0]
+        
+        if x[0].shape[0] > 1:
+            _, result = jax.lax.scan(kf_forward, (q_1), (x[0][1:], x[1][1:]))
+            q_dist, p_dist, log_likelihood = result
+
+            q_dist = (
+                jnp.vstack((jnp.expand_dims(q_1[0], axis=0), q_dist[0])),
+                jnp.vstack((jnp.expand_dims(q_1[1], axis=0), q_dist[1])),
+            )
+
+            p_dist = (
+                jnp.vstack((jnp.expand_dims(p_1[0], axis=0), p_dist[0])),
+                jnp.vstack((jnp.expand_dims(p_1[1], axis=0), p_dist[1])),
+            )
+
+            log_likelihood = jnp.append(jnp.array(log_likelihood1), log_likelihood)
+
+            return q_dist, p_dist, log_likelihood
+        else:
+            return (
+                jnp.expand_dims(q_1[0], axis=0),
+                jnp.expand_dims(q_1[1], axis=0)
+            ), (
+                jnp.expand_dims(p_1[0], axis=0),
+                jnp.expand_dims(p_1[1], axis=0),
+            ), jnp.array([log_likelihood1])
+    
+    @staticmethod
+    def forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array, beta, mask=0):
+        """
+        Single iteration of Kalman Filter forward pass
+        """
+        z_t_sub_1 = carry
+
+        # Prediction
+        z_t_given_t_sub_1 = KalmanFilter.predict(z_t_sub_1, A, b, Q)
+
+        # Update
+        z_t_given_t = KalmanFilter_MOTCAVI.update(z_t_given_t_sub_1, x_t, H, beta)
+
+        # Log-Likelihood
+        # project z_{t|t-1} and z_{t|t} into x (observation) space
+        z_t_given_t_sub_1_x_space = (H @ z_t_given_t_sub_1[0], H @ z_t_given_t_sub_1[1] @ H.T)
+        z_t_given_t_x_space = (H @ z_t_given_t[0], H @ z_t_given_t[1] @ H.T)
+        # get the "effective" observation with moments matching the true GMM
+        x_t_effective = MVN_inverse_bayes(z_t_given_t_sub_1_x_space, z_t_given_t_x_space)
+        # p(x_t) = \int p(z_i|x_{1:i-1}) p(x_i|z_i) dz_i
+        log_likelihood = MVN_multiply(*z_t_given_t_sub_1_x_space, *x_t_effective)[0]
+
+        return (z_t_given_t), (z_t_given_t, z_t_given_t_sub_1, log_likelihood) # carry, (q_dist, p_dist, log_likelihood)
+    
+    @staticmethod
+    def update(
+        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, beta: Array, mask=0
+    ):
+        
+        # hat_x_t = H @ z_t|t-1
+        hat_x_t = H @ z_t_given_t_sub_1[0]
+
+        # TODO FIX THIS EQUATION
+        # S_t = H @ P_t|t-1 @ H^T + R
+        # S_t = H @ z_t_given_t_sub_1[1] @ H.T + x_t[1]
+        S_t = H @ z_t_given_t_sub_1[1] @ H.T + (1/(1-beta[0])) * x_t[1]
+
+        # K_t = P_t|t-1 @ H^T @ S^-1
+        # K_t = z_t_given_t_sub_1[1] @ H.T @ jnp.linalg.inv(S_t)
+        K_t = z_t_given_t_sub_1[1] @ (jnp.linalg.solve(S_t.T, H)).T # (AB^-1)^T = (B^-1)^T A^T = (B^T)^-1 A^T
+
+        # z_t|t = z_t|t-1 + K_t @ (\Sum(\beta^(k)_t x^(k)_t) / (1-\beta^(0)) - @ z_t|t-1)
+        mu = z_t_given_t_sub_1[0] + K_t @ ((beta[1:]@x_t[0]).sum(axis=-1) / (1-beta[0]) - hat_x_t)
+
+        # P_t|t = P_t|t-1 - K_t @ S @ K_t^T
+        sigma = z_t_given_t_sub_1[1] - K_t @ S_t @ K_t.T
+
+        return (mu, sigma)
