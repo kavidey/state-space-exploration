@@ -144,6 +144,7 @@ class Decoder(nn.Module):
 
 class SVAE_LDS(nn.Module):
     latent_dims: int
+    iterations: int
     p_d: float
     g: float
     m_t: float
@@ -161,9 +162,13 @@ class SVAE_LDS(nn.Module):
         self.Q_param = self.param(
             "kf_Q", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
         )
+        self.R_param = self.param(
+            "kf_R", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
+        )
 
     def __call__(self, x, z_rng):
         z_hat = self.encoder(x)
+        z_hat = (z_hat[0], jnp.broadcast_to(self.R(), z_hat[1].shape))
 
         z_t_sub_1 = (z_hat[0][0], z_hat[1][0])
         z_hat = (z_hat[0][1:], z_hat[1][1:])
@@ -176,12 +181,13 @@ class SVAE_LDS(nn.Module):
 
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
     
-    def track_single_object(self, z_hat, z_t_sub_1, iterations):
+    def track_single_object(self, z_hat, z_t_sub_1):
         # initialize categorical distribution
         num_obj = z_hat[0].shape[1]
-        beta = jnp.zeros((z_hat[0].shape[0], num_obj+1))
-        beta = beta * num_obj * self.p_d
-        beta.at[:, 0].set((1-self.p_d))
+        beta = jnp.ones((z_hat[0].shape[0], num_obj+1))
+        beta = beta * self.p_d / num_obj
+        beta = beta.at[:, 0].set((1-self.p_d))
+
 
         def single_iteration(beta, A, b, Q, H):
             f_dist, p_dist, marginal_loglik = KalmanFilter_MOTCAVI.run_forward(z_hat, z_t_sub_1, A, b, Q, H, beta)
@@ -190,7 +196,7 @@ class SVAE_LDS(nn.Module):
             beta = self.update_categorical_distribution(z_hat, q_dist, H, Q)
 
             return beta, (f_dist, q_dist, p_dist, marginal_loglik)
-        beta, (f_dist, q_dist, p_dist, marginal_loglik) = jax.lax.scan(lambda carry, _: single_iteration(carry, self.A, self.b, self.Q(), jnp.eye(self.latent_dims)), beta, jnp.arange(iterations))
+        beta, (f_dist, q_dist, p_dist, marginal_loglik) = jax.lax.scan(lambda carry, _: single_iteration(carry, self.A, self.b, self.Q(), jnp.eye(self.latent_dims)), beta, jnp.arange(self.iterations))
         return (f_dist[0][-1], f_dist[1][-1]), (q_dist[0][-1], q_dist[1][-1]), (p_dist[0][-1], p_dist[1][-1]), marginal_loglik[-1]
 
     def update_categorical_distribution(self, z_hat, q_dist, H, Q):
@@ -202,12 +208,15 @@ class SVAE_LDS(nn.Module):
         Z_t = (1 - self.p_d) * self.g + unnorm_beta_k.sum(axis=-1)
 
         beta_0 = (1/Z_t) * (1-self.p_d)*self.g
-        beta_k = unnorm_beta_k / Z_t
+        beta_k = unnorm_beta_k / Z_t[..., None]
 
         return jnp.concat((beta_0[..., None], beta_k), axis=1)
 
     def Q(self):
         return vec_to_cov_cholesky.forward(self.Q_param)
+    
+    def R(self):
+        return vec_to_cov_cholesky.forward(self.R_param)
     
 Batched_SVAE_LDS = nn.vmap(SVAE_LDS, 
     in_axes=0, out_axes=0,
@@ -262,7 +271,7 @@ def create_train_step(
 # %% Create LDS Model
 key, model_key = jnr.split(key)
 
-model = Batched_SVAE_LDS(latent_dims=latent_dims)
+model = Batched_SVAE_LDS(latent_dims=latent_dims, iterations=15, p_d=0.9, g=1, m_t=1)
 optimizer = optax.adam(learning_rate=1e-3)
 
 train_step, params, opt_state = create_train_step(model_key, model, optimizer)
@@ -310,7 +319,7 @@ for epoch in pbar:
     running_kl.append(total_kl / len(train_dataloader))
     mngr.save(epoch, args=ocp.args.StandardSave(params))
 mngr.wait_until_finished()
-# %% LDS Loss Curves
+    # %% LDS Loss Curves
 plt.plot(running_loss, label='Total Loss')
 plt.plot(running_mse, label='MSE Loss')
 plt.plot(running_kl, label='KL Loss')

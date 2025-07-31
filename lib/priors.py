@@ -335,7 +335,7 @@ class KalmanFilter_MOTPDA(KalmanFilter):
 
 class KalmanFilter_MOTCAVI(KalmanFilter):
     @staticmethod
-    def run_forward(x: MVN_Type, z_t_sub_1: MVN_Type, A: Array, b: Array, Q: Array, H: Array, beta, mask=None):
+    def run_forward(x: MVN_Type, z_t_sub_1: MVN_Type, A: Array, b: Array, Q: Array, H: Array, beta: Array):
         """
         Run Kalman Filter forward pass on a sequence of distributions and return results
 
@@ -353,8 +353,8 @@ class KalmanFilter_MOTCAVI(KalmanFilter):
             process noise covariance matrix
         H: Array
             observation matrix
-        mask: None
-            unused
+        beta: Array
+            observation weights
 
         Returns
         -------
@@ -362,13 +362,14 @@ class KalmanFilter_MOTCAVI(KalmanFilter):
             q_dist, p_dist, log_likelihood
 
         """
-        kf_forward = lambda carry, x: KalmanFilter_MOTCAVI.forward(carry, x, A, b, Q, H, beta, 0)
+        kf_forward = lambda carry, X: KalmanFilter_MOTCAVI.forward(carry, X[0], A, b, Q, H, X[1])
 
         x_1 = (x[0][0], x[1][0])
-        q_1, w_k1 = KalmanFilter_MOTCAVI.update(z_t_sub_1,
+        beta_1 = beta[0]
+        q_1 = KalmanFilter_MOTCAVI.update(z_t_sub_1,
                                   x_1,
                                   H,
-                                  0)
+                                  beta_1)
         p_1 = z_t_sub_1
 
         # Log-Likelihood
@@ -382,7 +383,7 @@ class KalmanFilter_MOTCAVI(KalmanFilter):
         log_likelihood1 = MVN_multiply(*p_1_x_space, *x_1_effective)[0]
         
         if x[0].shape[0] > 1:
-            _, result = jax.lax.scan(kf_forward, (q_1), (x[0][1:], x[1][1:]))
+            _, result = jax.lax.scan(kf_forward, (q_1), ((x[0][1:], x[1][1:]), beta[1:]))
             q_dist, p_dist, log_likelihood = result
 
             q_dist = (
@@ -408,7 +409,7 @@ class KalmanFilter_MOTCAVI(KalmanFilter):
             ), jnp.array([log_likelihood1])
     
     @staticmethod
-    def forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array, beta, mask=0):
+    def forward(carry: MVN_Type, x_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array, beta: Array):
         """
         Single iteration of Kalman Filter forward pass
         """
@@ -433,16 +434,15 @@ class KalmanFilter_MOTCAVI(KalmanFilter):
     
     @staticmethod
     def update(
-        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, beta: Array, mask=0
+        z_t_given_t_sub_1: MVN_Type, x_t: MVN_Type, H: Array, beta: Array
     ):
         
         # hat_x_t = H @ z_t|t-1
         hat_x_t = H @ z_t_given_t_sub_1[0]
 
-        # TODO FIX THIS EQUATION
         # S_t = H @ P_t|t-1 @ H^T + R
         # S_t = H @ z_t_given_t_sub_1[1] @ H.T + x_t[1]
-        S_t = H @ z_t_given_t_sub_1[1] @ H.T + (1/(1-beta[0])) * x_t[1]
+        S_t = H @ z_t_given_t_sub_1[1] @ H.T + (1/(1-beta[0])) * x_t[1][0] # R is a model parameter, so we get it from the first observation
 
         # K_t = P_t|t-1 @ H^T @ S^-1
         # K_t = z_t_given_t_sub_1[1] @ H.T @ jnp.linalg.inv(S_t)
