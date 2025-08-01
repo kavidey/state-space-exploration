@@ -235,7 +235,7 @@ class KalmanFilter:
         K_T = p_dist[1][-1] @ H.T @ jnp.linalg.inv(S_T) # TODO: optimize with solve
 
         # \Sigma_{T,T-1|T} = (I - K_T@H) @ A @ \Sigma_{T-1|T-1}
-        sigma_T_and_T_sub_1_given_T = (jnp.eye(k) - K_T@H) @ A @ f_dist[1][-2]
+        sigma_T_and_T_sub_1_given_T_last = (jnp.eye(k) - K_T@H) @ A @ f_dist[1][-2]
         # recursively calculate previous items in sequence using `scan`
         def cross_cov_recurse(carry, x):
             # \Sigma_{t+1,t|T}
@@ -252,8 +252,8 @@ class KalmanFilter:
             return sigma_t_and_t_sub_1_given_T, sigma_t_and_t_sub_1_given_T
         # #                                                                                             (\Sigma_{t|t}, \Sigma_{t-1|t-1},               \Sigma_{t|t-1})
         # _, sigma_t_and_t_sub_1_given_T = jax.lax.scan(cross_cov_recurse, sigma_T_and_T_sub_1_given_T, (f_dist[1],    jnp.concat((z_t_sub_1[1][None], f_dist[1][:-1]), axis=0), p_dist[1]), reverse=True)
-        _, sigma_t_and_t_sub_1_given_T = jax.lax.scan(cross_cov_recurse, sigma_T_and_T_sub_1_given_T, (f_dist[1][1:], f_dist[1][:-1], p_dist[1][1:]), reverse=True)
-        sigma_t_and_t_sub_1_given_T = jnp.concat((sigma_t_and_t_sub_1_given_T, sigma_T_and_T_sub_1_given_T[None]), axis=0)
+        _, sigma_t_and_t_sub_1_given_T = jax.lax.scan(cross_cov_recurse, sigma_T_and_T_sub_1_given_T_last, (f_dist[1][1:], f_dist[1][:-1], p_dist[1][1:]), reverse=True)
+        sigma_t_and_t_sub_1_given_T = jnp.concat((sigma_t_and_t_sub_1_given_T, sigma_T_and_T_sub_1_given_T_last[None]), axis=0)
         sigma_t_and_t_sub_1_given_T = jnp.flip(sigma_t_and_t_sub_1_given_T, axis=0)
 
         ### Step 2: calculate posterior expectations
@@ -263,10 +263,10 @@ class KalmanFilter:
         # E[z_t @ z_t^T | x_{1:T}] = \Sigma_{t|T} + \mu_{t|T} @ \mu_{t|T}^T = P_t
         # the weird array syntax at the end takes an element wise outer product for each step in the timeseries
         P_t = q_dist[1] + elementwise_outer(mu_t_given_T, mu_t_given_T)
-        
-        # E[z_t @ z_{t-1}^T | x_{1:T}] = \Sigma_{t,t-1|T} + \mu_{t|T}\mu_{t-1|T}^T = P_{t,t-1}
-        P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T + elementwise_outer(mu_t_given_T, jnp.concat((z_t_sub_1[0][None], f_dist[0][:-1]), axis=0))
 
+        # E[z_t @ z_{t-1}^T | x_{1:T}] = \Sigma_{t,t-1|T} + \mu_{t|T}\mu_{t-1|T}^T = P_{t,t-1}
+        # P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T + elementwise_outer(mu_t_given_T, jnp.concat((z_t_sub_1[0][None], f_dist[0][:-1]), axis=0))
+        P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T[1:] + elementwise_outer(mu_t_given_T[1:], mu_t_given_T[:-1])
 
         ### Step 3: calculate M step update
         # H_{new} =  (\Sum_{t=1}^T x_t @ \mu_{t|T}^T) @ (\Sum_{t=1}^T P_t)^{-1}
@@ -276,10 +276,10 @@ class KalmanFilter:
         R_new = (1/T) * (elementwise_outer(x[0], x[0]) - H_new @ elementwise_outer(mu_t_given_T, x[0])).sum(axis=0)
 
         # A_{new} = (\Sum_{t=1}^T P_{t,t-1}) @ (\Sum_{t=1}^T P_t)^{-1}
-        A_new = P_t_and_t_sub_1.sum(axis=0) @ jnp.linalg.inv(P_t.sum(axis=0)) # TODO: optimize with solve
+        A_new = P_t_and_t_sub_1.sum(axis=0) @ jnp.linalg.inv(P_t[1:].sum(axis=0)) # TODO: optimize with solve
 
         # Q_{new} = (1/(T-1)) * (\Sum_{t=1}^T P_t - A_{new} @ \Sum_{t=1}^T P_{t,t-1}^T)
-        Q_new = (1/(T-1)) * (P_t.sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0).T)
+        Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0))
 
         mu_0_new = q_dist[0][0]
         sigma_0_new = q_dist[1][0]
