@@ -9,6 +9,10 @@ import jax.numpy as jnp
 import jax.random as jnr
 from jax import Array
 
+from tensorflow_probability.substrates import jax as tfp
+tfd = tfp.distributions
+tfb = tfp.bijectors
+
 import torch
 
 from lib.priors import KalmanFilter, KalmanFilter_MOTPDA, KalmanFilter_MOTCAVI
@@ -77,13 +81,18 @@ A, b, Q, R, H
 # %% [markdown]
 # use EM to optimize parameters
 # %%
+vec_to_cov_cholesky = tfb.Chain([
+    tfb.CholeskyOuterProduct(),
+    tfb.FillScaleTriL(diag_bijector=tfb.Exp(), diag_shift=None)
+])
+
 key, tmpkey = jnr.split(key)
 # A = jnp.eye(4) + jnr.normal(key, (4,4)) * 0.5
 # b = jnp.zeros((4))
 # key, tmpkey = jnr.split(key)
-Q = jnp.eye(4) * 0.1 + jnr.normal(key, (4,4)) * 0.5
+Q = vec_to_cov_cholesky.forward(jnr.normal(key, int(latent_dims*(latent_dims+1)/2)) * 0.1)
 # key, tmpkey = jnr.split(key)
-# R = jnp.eye(2) * 0.1 + jnr.normal(key, (2,2)) * 0.01
+# R = vec_to_cov_cholesky.forward(jnr.normal(key, ((int(pos_dims*(pos_dims+1)/2)))))
 # key, tmpkey = jnr.split(key)
 # H = jnp.array([[1,0,0,0],[0,1,0,0]]) + jnr.normal(key, (2,4)) * 0.5
 
