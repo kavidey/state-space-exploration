@@ -69,7 +69,7 @@ H = jnp.array([[1,0,0,0],[0,1,0,0]])
 x = (setup_batch[0,:,0,:num_balls], jnp.broadcast_to(R, (50, 2,2)))
 z_t_sub_1 = (jnp.append(x[0][0], jnp.zeros(2)), Q)
 f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-q_dist = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+q_dist, _ = KalmanFilter.run_backward(f_dist, A, b, Q, H)
 
 plt.scatter(*x[0].T, color='black')
 plt.plot(*(H@q_dist[0].T))
@@ -78,17 +78,17 @@ A, b, Q, R, H
 # use EM to optimize parameters
 # %%
 key, tmpkey = jnr.split(key)
-A = jnp.eye(4) + jnr.normal(key, (4,4)) * 0.1
-b = jnp.zeros((4))
-key, tmpkey = jnr.split(key)
-Q = jnp.eye(4) * 0.1 + jnr.normal(key, (4,4)) * 0.01
-key, tmpkey = jnr.split(key)
-R = jnp.eye(2) * 0.1 + jnr.normal(key, (2,2)) * 0.01
-key, tmpkey = jnr.split(key)
-H = jnp.array([[1,0,0,0],[0,1,0,0]]) + jnr.normal(key, (2,4)) * 0.1
+# A = jnp.eye(4) + jnr.normal(key, (4,4)) * 0.5
+# b = jnp.zeros((4))
+# key, tmpkey = jnr.split(key)
+Q = jnp.eye(4) * 0.1 + jnr.normal(key, (4,4)) * 0.5
+# key, tmpkey = jnr.split(key)
+# R = jnp.eye(2) * 0.1 + jnr.normal(key, (2,2)) * 0.01
+# key, tmpkey = jnr.split(key)
+# H = jnp.array([[1,0,0,0],[0,1,0,0]]) + jnr.normal(key, (2,4)) * 0.5
 
 f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-q_dist = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+q_dist, _ = KalmanFilter.run_backward(f_dist, A, b, Q, H)
 
 plt.scatter(*x[0].T, color='black')
 plt.plot(*(H@q_dist[0].T))
@@ -99,19 +99,20 @@ A, b, Q, R, H
 #     A, b, Q, R, H = carry
 
 #     f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-#     q_dist = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+#     q_dist, K_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
 
-#     H, R, A, Q, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, A, Q, H, R)
+#     # H, R, A, Q, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, A, Q, H, R)
+#     _, _, A, _, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, K_t, A, Q, H, R)
 
 #     return (A, b, Q, R, H), i
+# (A, b, Q, R, H), _ = jax.lax.scan(single_iter, (A, b, Q, R, H), jnp.arange(1000))
 
-# (A, b, Q, R, H), _ = jax.lax.scan(single_iter, (A, b, Q, R, H), jnp.arange(2))
-
-for i in range(2):
+for i in range(10):
     f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-    q_dist = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+    q_dist, K_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
 
-    H, R, A, Q, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, A, Q, H, R)
+    # H, R, A, Q, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, K_t, A, Q, H, R)
+    _, _, _, Q, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, K_t, A, Q, H, R)
 
 plt.scatter(*x[0].T, color='black')
 plt.plot(*(H@q_dist[0].T))

@@ -100,7 +100,7 @@ class KalmanFilter:
         # z_t|t-1 = A @ z_t-1|t-1 + b
         mu = A @ z_t[0] + b
 
-        # P_t|t-1 = A @ P_t-1|t-1 @ A^T + Q
+        # \Sigma_t|t-1 = A @ \Sigma_t-1|t-1 @ A^T + Q
         sigma = A @ z_t[1] @ A.T + Q
 
         return (mu, sigma)
@@ -127,22 +127,22 @@ class KalmanFilter:
         # hat_x_t = H @ z_t|t-1
         hat_x_t = H @ z_t_given_t_sub_1[0]
 
-        # S_t = H @ P_t|t-1 @ H^T + R
+        # S_t = H @ \Sigma_t|t-1 @ H^T + R
         S_t = H @ z_t_given_t_sub_1[1] @ H.T + x_t[1]
-        # K_t = P_t|t-1 @ H^T @ S^-1
+        # K_t = \Sigma_t|t-1 @ H^T @ S^-1
         # K_t = z_t_given_t_sub_1[1] @ H.T @ jnp.linalg.inv(S_t)
         K_t = z_t_given_t_sub_1[1] @ (jnp.linalg.solve(S_t.T, H)).T # (AB^-1)^T = (B^-1)^T A^T = (B^T)^-1 A^T
 
         # z_t|t = z_t|t-1 + K_t @ (x_t - H @ z_t|t-1)
         mu = z_t_given_t_sub_1[0] + K_t @ (x_t[0] - hat_x_t)
 
-        # P_t|t = P_t|t-1 - K_t @ S @ K_t^T
+        # \Sigma_t|t = \Sigma_t|t-1 - K_t @ S @ K_t^T
         sigma = z_t_given_t_sub_1[1] - K_t @ S_t @ K_t.T
 
         return jax.lax.cond(mask, lambda: z_t_given_t_sub_1, lambda: (mu, sigma))
     
     @staticmethod
-    def run_backward(f_dist: MVN_Type, A: Array, b: Array, Q: Array, H: Array) -> MVN_Type:
+    def run_backward(f_dist: MVN_Type, A: Array, b: Array, Q: Array, H: Array) -> tuple[MVN_Type, Array]:
         """
         Run Kalman Filter backward pass on a sequence of distributions and return results
 
@@ -168,14 +168,14 @@ class KalmanFilter:
         
         q_dist_T = (f_dist[0][-1], f_dist[1][-1])
         q_dist_1_to_T_sub_1 = (f_dist[0][:-1], f_dist[1][:-1])
-        _, q_dist = jax.lax.scan(kf_backward, (q_dist_T), q_dist_1_to_T_sub_1, reverse=True)
+        _, (q_dist, K_t) = jax.lax.scan(kf_backward, (q_dist_T), q_dist_1_to_T_sub_1, reverse=True)
 
         q_dist = (
             jnp.vstack((q_dist[0], jnp.expand_dims(q_dist_T[0], 0))),
             jnp.vstack((q_dist[1], jnp.expand_dims(q_dist_T[1], 0)))
         )
 
-        return q_dist
+        return q_dist, K_t
     
     @staticmethod
     def backward(carry, z_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array):
@@ -200,19 +200,47 @@ class KalmanFilter:
 
         z_t_given_T = (mu, sigma)
 
-        return (z_t_given_T), (z_t_given_T) # carry, (posterior_dist)
+        return (z_t_given_T), (z_t_given_T, K) # carry, (posterior_dist, K_t)
     
     @staticmethod
-    def m_step_update(x, z_t_sub_1, p_dist, f_dist, q_dist, A, Q, H, R):
-        r"""
-        Updates model parameters for kalman filter using the EM algorithm
+    def cross_covariance(q_dist: MVN_Type, K: Array):
+        """
+        Calculates pairwise covariance between t and t-1
 
         Parameter
         ---------
         f_dist: tuple[Array, Array]
             updated state distribution represented as (mean, covariance)
+        K: Array
+            sequence of kalman gains
+        
+        Returns
+        -------
+        sigma_t_and_t_sub_1_given_T: Array
+            pairwise covariance, 0th entry is missing
+        """
+        return q_dist[1][1:] @ jnp.moveaxis(K, -1, -2)
+
+    @staticmethod
+    def m_step_update(x: MVN_Type, z_t_sub_1: MVN_Type, p_dist: MVN_Type, f_dist: MVN_Type, q_dist: MVN_Type, K_t: Array, A: Array, Q: Array, H: Array, R: Array):
+        r"""
+        Updates model parameters for kalman filter using the EM algorithm
+
+        Parameter
+        ---------
+        x: tuple[Array, Array]
+            observations represented as (mean, covariance)
+        z_t_sub_1: tuple[Array, Array]
+            latent prior represented as (mean, covariance)
+        p_dist: tuple[Array, Array]
+            predicted state distribution represented as (mean, covariance)
+        f_dist: tuple[Array, Array]
+            updated state distribution represented as (mean, covariance)
         q_dist: tuple[Array, Array]
             smoothed state distribution represented as (mean, covariance)
+        K_t: Array
+            sequence of kalman gains
+        
         
         Returns
         -------
@@ -228,33 +256,35 @@ class KalmanFilter:
         elementwise_outer = jax.vmap(jnp.outer)
 
         ### Step 1: calculate cross-covariance recursion, aka 1-lag smoother
-        # S_T = H @ \Sigma_{T|T-1} @ H.T + R
-        S_T = H @ p_dist[1][-1] @ H.T + R
+        # # S_T = H @ P_T|T-1 @ H^T + R
+        # S_T = H @ p_dist[1][-1] @ H.T + R
 
-        # K_T = \Sigma_{T|T-1} @ H.T
-        K_T = p_dist[1][-1] @ H.T @ jnp.linalg.inv(S_T) # TODO: optimize with solve
+        # # K_t = P_T|T-1 @ H^T @ S^-1
+        # # K_t = p_dist[1][-1] @ H.T @ jnp.linalg.inv(S_T)
+        # K_T = p_dist[1][-1] @ (jnp.linalg.solve(S_T.T, H)).T # (AB^-1)^T = (B^-1)^T A^T = (B^T)^-1 A^T
 
-        # \Sigma_{T,T-1|T} = (I - K_T@H) @ A @ \Sigma_{T-1|T-1}
-        sigma_T_and_T_sub_1_given_T_last = (jnp.eye(k) - K_T@H) @ A @ f_dist[1][-2]
-        # recursively calculate previous items in sequence using `scan`
-        def cross_cov_recurse(carry, x):
-            # \Sigma_{t+1,t|T}
-            sigma_t_add_1_and_t_given_T = carry
+        # # \Sigma_{T,T-1|T} = (I - K_T@H) @ A @ \Sigma_{T-1|T-1}
+        # sigma_T_and_T_sub_1_given_T_last = (jnp.eye(k) - K_T@H) @ A @ f_dist[1][-2]
+        # # recursively calculate previous items in sequence using `scan`
+        # def cross_cov_recurse(carry, x):
+        #     # \Sigma_{t+1,t|T}
+        #     sigma_t_add_1_and_t_given_T = carry
             
-            # (\Sigma_{t|t}, \Sigma_{t-1|t-1}, \Sigma_{t|t-1})
-            sigma_t_given_t, sigma_t_sub_1_given_t_sub_1, sigma_t_given_t_sub_1 = x
+        #     # (\Sigma_{t|t}, \Sigma_{t-1|t-1}, \Sigma_{t|t-1})
+        #     sigma_t_given_t, sigma_t_sub_1_given_t_sub_1, sigma_t_given_t_sub_1 = x
 
-            # J_{t-1} = \Sigma_{t-1|t-1} @ A^T @ \Sigma_{t|t-1}^{-1}
-            J_t_sub_1 = sigma_t_sub_1_given_t_sub_1 @ A.T @ jnp.linalg.inv(sigma_t_given_t_sub_1)  # TODO: optimize with solve
+        #     # J_{t-1} = \Sigma_{t-1|t-1} @ A^T @ \Sigma_{t|t-1}^{-1}
+        #     J_t_sub_1 = sigma_t_sub_1_given_t_sub_1 @ A.T @ jnp.linalg.inv(sigma_t_given_t_sub_1)  # TODO: optimize with solve
 
-            # \Sigma_{t,t-1|T} = \Sigma_{t|t} @ J_{t-1}^T + J_{t-1} @ (\Sigma_{t+1,t|T} - A@\Sigma_{t|t}) @ J_{t-1}^T
-            sigma_t_and_t_sub_1_given_T = sigma_t_given_t @ J_t_sub_1.T + J_t_sub_1@(sigma_t_add_1_and_t_given_T - A@sigma_t_given_t)@J_t_sub_1.T
-            return sigma_t_and_t_sub_1_given_T, sigma_t_and_t_sub_1_given_T
-        # #                                                                                             (\Sigma_{t|t}, \Sigma_{t-1|t-1},               \Sigma_{t|t-1})
-        # _, sigma_t_and_t_sub_1_given_T = jax.lax.scan(cross_cov_recurse, sigma_T_and_T_sub_1_given_T, (f_dist[1],    jnp.concat((z_t_sub_1[1][None], f_dist[1][:-1]), axis=0), p_dist[1]), reverse=True)
-        _, sigma_t_and_t_sub_1_given_T = jax.lax.scan(cross_cov_recurse, sigma_T_and_T_sub_1_given_T_last, (f_dist[1][1:], f_dist[1][:-1], p_dist[1][1:]), reverse=True)
-        sigma_t_and_t_sub_1_given_T = jnp.concat((sigma_t_and_t_sub_1_given_T, sigma_T_and_T_sub_1_given_T_last[None]), axis=0)
-        sigma_t_and_t_sub_1_given_T = jnp.flip(sigma_t_and_t_sub_1_given_T, axis=0)
+        #     # \Sigma_{t,t-1|T} = \Sigma_{t|t} @ J_{t-1}^T + J_{t-1} @ (\Sigma_{t+1,t|T} - A@\Sigma_{t|t}) @ J_{t-1}^T
+        #     sigma_t_and_t_sub_1_given_T = sigma_t_given_t @ J_t_sub_1.T + J_t_sub_1@(sigma_t_add_1_and_t_given_T - A@sigma_t_given_t)@J_t_sub_1.T
+        #     return sigma_t_and_t_sub_1_given_T, sigma_t_and_t_sub_1_given_T
+        # # #                                                                                             (\Sigma_{t|t}, \Sigma_{t-1|t-1},               \Sigma_{t|t-1})
+        # # _, sigma_t_and_t_sub_1_given_T = jax.lax.scan(cross_cov_recurse, sigma_T_and_T_sub_1_given_T, (f_dist[1],    jnp.concat((z_t_sub_1[1][None], f_dist[1][:-1]), axis=0), p_dist[1]), reverse=True)
+        # _, sigma_t_and_t_sub_1_given_T = jax.lax.scan(cross_cov_recurse, sigma_T_and_T_sub_1_given_T_last, (f_dist[1][1:], f_dist[1][:-1], p_dist[1][1:]), reverse=True)
+        # sigma_t_and_t_sub_1_given_T = jnp.concat((sigma_t_and_t_sub_1_given_T, sigma_T_and_T_sub_1_given_T_last[None]), axis=0)
+        # sigma_t_and_t_sub_1_given_T = jnp.flip(sigma_t_and_t_sub_1_given_T, axis=0)
+        sigma_t_and_t_sub_1_given_T = KalmanFilter.cross_covariance(q_dist, K_t)
 
         ### Step 2: calculate posterior expectations
         # E[z_t|x_{1:T}] \mu_{t|T}
@@ -266,25 +296,37 @@ class KalmanFilter:
 
         # E[z_t @ z_{t-1}^T | x_{1:T}] = \Sigma_{t,t-1|T} + \mu_{t|T}\mu_{t-1|T}^T = P_{t,t-1}
         # P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T + elementwise_outer(mu_t_given_T, jnp.concat((z_t_sub_1[0][None], f_dist[0][:-1]), axis=0))
-        P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T[1:] + elementwise_outer(mu_t_given_T[1:], mu_t_given_T[:-1])
+        # P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T[1:] + elementwise_outer(mu_t_given_T[1:], mu_t_given_T[:-1])
+        P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T + elementwise_outer(mu_t_given_T[1:], mu_t_given_T[:-1])
 
         ### Step 3: calculate M step update
         # H_{new} =  (\Sum_{t=1}^T x_t @ \mu_{t|T}^T) @ (\Sum_{t=1}^T P_t)^{-1}
-        H_new = elementwise_outer(x[0], mu_t_given_T).sum(axis=0) @ jnp.linalg.inv(P_t.sum(axis=0)) # TODO: optimize with solve
+        H_new = elementwise_outer(x[0], mu_t_given_T).sum(axis=0) @ jnp.linalg.inv(P_t.sum(axis=0)) # TODO: optimize with solve)
 
         # R_{new} = (1/T) * \Sum_{t=1}^T (x_t@x_t^T - H_new @ \mu_{t|T} @ x_t^T)
         R_new = (1/T) * (elementwise_outer(x[0], x[0]) - H_new @ elementwise_outer(mu_t_given_T, x[0])).sum(axis=0)
 
         # A_{new} = (\Sum_{t=1}^T P_{t,t-1}) @ (\Sum_{t=1}^T P_t)^{-1}
-        A_new = P_t_and_t_sub_1.sum(axis=0) @ jnp.linalg.inv(P_t[1:].sum(axis=0)) # TODO: optimize with solve
-
+        # A_new = P_t_and_t_sub_1.sum(axis=0) @ jnp.linalg.inv(P_t[1:].sum(axis=0)) # TODO: optimize with solve
+        A_new = A
+        
         # Q_{new} = (1/(T-1)) * (\Sum_{t=1}^T P_t - A_{new} @ \Sum_{t=1}^T P_{t,t-1}^T)
-        Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0))
+        # Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0))
+        Q_new = (1/(T-1)) * (
+            elementwise_outer(
+                mu_t_given_T[1:] - (A_new @ mu_t_given_T[:-1][..., None])[..., 0],
+                mu_t_given_T[1:] - (A_new @ mu_t_given_T[:-1][..., None])[..., 0]
+            )
+            + A_new @ q_dist[1][:-1] @ A_new.T
+            + q_dist[1][:-1]
+            - (sigma_t_and_t_sub_1_given_T @ A_new.T)
+            - (A_new @ jnp.moveaxis(sigma_t_and_t_sub_1_given_T, -1, -2))
+        ).sum(axis=0)
 
         mu_0_new = q_dist[0][0]
         sigma_0_new = q_dist[1][0]
 
-        return H_new, R_new, A_new, Q_new, (mu_0_new, sigma_0_new)
+        return H_new, R_new, A_new, Q_new, ((mu_0_new, sigma_0_new), sigma_t_and_t_sub_1_given_T)
 
 class KalmanFilter_MOTPDA(KalmanFilter):
     @staticmethod
