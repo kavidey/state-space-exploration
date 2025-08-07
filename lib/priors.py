@@ -201,7 +201,7 @@ class KalmanFilter:
         z_t_given_T = (mu, sigma)
 
         return (z_t_given_T), (z_t_given_T, J) # carry, (posterior_dist, J_t)
-    
+
     @staticmethod
     def cross_covariance(q_dist: MVN_Type, J_t):
         """
@@ -263,11 +263,9 @@ class KalmanFilter:
         # return log_likelihood
         log_likelihood = 0
         for t in range(1, T):
-            log_likelihood += jnp.log(MVN_log_likelihood(A @ z_t[0][t-1] + b, Q, z_t[0][t]))
+            log_likelihood += MVN_log_likelihood(A @ z_t[0][t-1] + b, Q, z_t[0][t])
         for t in range(T):
-            log_likelihood += jnp.log(MVN_log_likelihood(H @ z_t[0][t], x_t[1][t], x_t[0][t]))
-        
-        log_likelihood = log_likelihood * (1/T)
+            log_likelihood += MVN_log_likelihood(H @ z_t[0][t], x_t[1][t], x_t[0][t])
 
         return log_likelihood
 
@@ -328,51 +326,28 @@ class KalmanFilter:
 
         
         # Q_{new} = (1/(T-1)) * (\Sum_{t=1}^T P_t - A_{new} @ \Sum_{t=1}^T P_{t,t-1}^T)
-
-        # Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0).T)
-
-        # L_t = f_dist[1] @ A @ jax.vmap(jnp.linalg.inv)(p_dist[1])
-        # Q_new = (1/(T-1)) * (
-        #     elementwise_outer(
-        #         mu_t_given_T[1:] - (A_new @ mu_t_given_T[:-1][..., None])[..., 0],
-        #         mu_t_given_T[1:] - (A_new @ mu_t_given_T[:-1][..., None])[..., 0]
+        # OURS
+        Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0).T)
+        # THEIRS
+        # Q_new = jnp.zeros((k, k))
+        # for t in range(T - 1):
+        #     err = (
+        #         q_dist[0][t + 1]
+        #         - jnp.dot(A, q_dist[0][t])
+        #         - b
         #     )
-        #     + A_new @ q_dist[1][:-1] @ A_new.T
-        #     + q_dist[1][:-1]
-        #     - (sigma_t_and_t_sub_1_given_T @ A_new.T)
-        #     # - q_dist[1][1:] @ jnp.moveaxis(L_t[:-1],-1,-2) @ A_new.T
-        #     - (A_new @ jnp.moveaxis(sigma_t_and_t_sub_1_given_T, -1, -2))
-        #     # - A_new @ L_t[:-1] @ q_dist[1][1:]
-        # ).sum(axis=0)
-
-        # Q_new = 1/(T-1) * (
-        #     P_t[1:] - P_t_and_t_sub_1 @ A_new.T - A_new @ jnp.moveaxis(P_t_and_t_sub_1, -1, -2) + A_new @ P_t[:-1] @ A_new.T
-        # ).sum(axis=0)
-
-        # Q_new = jnp.zeros((k,k))
-        # for i in range(1, T):
-        #     Q_new += P_t[i] - P_t_and_t_sub_1[i] @ A_new.T - A_new @ P_t_and_t_sub_1[i].T + A_new @ P_t[i-1] @ A_new.T
+        #     Vt1t_A = jnp.dot(jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T))[t+1], A.T)
+        #     Q_new += (
+        #         jnp.outer(err, err)
+        #         + jnp.dot(
+        #             A,
+        #             jnp.dot(q_dist[1][t], A.T),
+        #         )
+        #         + q_dist[1][t + 1]
+        #         - Vt1t_A
+        #         - Vt1t_A.T
+        #     )
         # Q_new = (1/(T-1)) * Q_new
-
-        Q_new = jnp.zeros((k, k))
-        for t in range(T - 1):
-            err = (
-                q_dist[0][t + 1]
-                - jnp.dot(A, q_dist[0][t])
-                - b
-            )
-            Vt1t_A = jnp.dot(jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T))[t+1], A.T)
-            Q_new += (
-                jnp.outer(err, err)
-                + jnp.dot(
-                    A,
-                    jnp.dot(q_dist[1][t], A.T),
-                )
-                + q_dist[1][t + 1]
-                - Vt1t_A
-                - Vt1t_A.T
-            )
-        Q_new = (1/(T-1)) * Q_new
 
         mu_0_new = q_dist[0][0]
         sigma_0_new = q_dist[1][0]
