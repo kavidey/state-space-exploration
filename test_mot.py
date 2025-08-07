@@ -19,7 +19,7 @@ from lib.priors import KalmanFilter, KalmanFilter_MOTPDA, KalmanFilter_MOTCAVI
 from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply, MVN_Type, MVN_inverse_bayes
 
 from pykalman import KalmanFilter as PyKalmanFilter
-from pykalman.standard import _smooth, _smooth_pair
+from pykalman.standard import _em_transition_covariance, _em_transition_matrix
 
 jax.config.update("jax_enable_x64", True)
 # %%
@@ -69,7 +69,7 @@ plt.ylim(-1, 1)
 # %%
 A = jnp.array([[1, 0, 0.1, 0], [0, 1, 0, 0.1], [0,0,1,0], [0,0,0,1]])
 b = jnp.zeros((4))
-Q = jnp.eye(4) * 0.1
+Q = jnp.eye(4) * 0.05
 R = jnp.eye(2) * 0.1
 H = jnp.array([[1,0,0,0],[0,1,0,0]])
 
@@ -104,10 +104,10 @@ vec_to_cov_cholesky = tfb.Chain([
 ])
 
 key, tmpkey = jnr.split(key)
-# A = (jnp.eye(4) + jnr.normal(key, (4,4)) * 0.5).round(2)
+# A = (jnp.eye(4) + jnr.normal(key, (4,4)) * 0.1).round(2)
 # b = jnp.zeros((4))
 # key, tmpkey = jnr.split(key)
-Q = vec_to_cov_cholesky.forward(jnr.normal(key, int(latent_dims*(latent_dims+1)/2)) * 0.1).round(2)
+Q = vec_to_cov_cholesky.forward(jnr.normal(key, (int(latent_dims*(latent_dims+1)/2),)) * 0.1).round(2)
 # key, tmpkey = jnr.split(key)
 # R = vec_to_cov_cholesky.forward(jnr.normal(key, ((int(pos_dims*(pos_dims+1)/2)))) * 0.1).round(2)
 # key, tmpkey = jnr.split(key)
@@ -134,9 +134,52 @@ plt.plot(*(H@q_dist[0].T))
 plt.plot(*(H@pkf_q_dist[0].T), '--', linewidth=1)
 A, b, Q, R, H
 # %%
-pkf_cross_cov = _smooth_pair(q_dist[1], J_t)[1:]
-cross_cov = KalmanFilter.cross_covariance(q_dist, J_t)
-jnp.allclose(pkf_cross_cov, cross_cov)
+k = f_dist[0].shape[-1]
+T = f_dist[0].shape[0]
+elementwise_outer = jax.vmap(jnp.outer)
+
+sigma_t_and_t_sub_1_given_T = KalmanFilter.cross_covariance(q_dist, J_t)
+mu_t_given_T = q_dist[0]
+
+P_t = q_dist[1] + elementwise_outer(mu_t_given_T, mu_t_given_T)
+P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T + elementwise_outer(mu_t_given_T[1:], mu_t_given_T[:-1])
+
+A_new = jnp.linalg.solve(P_t[:-1].sum(axis=0).T, P_t_and_t_sub_1.sum(axis=0).T).T
+pkf_A = _em_transition_matrix(b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T)))
+
+print(f"A all close: {jnp.allclose(A_new, pkf_A)}")
+# print(A_new.round(3))
+# print(pkf_A.round(3))
+
+pkf_Q = _em_transition_covariance(A, b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T)))
+
+# Q_new = 1/(T-1) * (
+#     P_t[1:] - P_t_and_t_sub_1 @ A.T - A_new @ jnp.moveaxis(P_t_and_t_sub_1, -1, -2) + A @ P_t[:-1] @ A.T
+# ).sum(axis=0)
+# Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0).T)
+Q_new = jnp.zeros((k, k))
+for t in range(T - 1):
+    err = (
+        q_dist[0][t + 1]
+        - jnp.dot(A, q_dist[0][t])
+        - b
+    )
+    Vt1t_A = jnp.dot(jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T))[t+1], A.T)
+    Q_new += (
+        jnp.outer(err, err)
+        + jnp.dot(
+            A,
+            jnp.dot(q_dist[1][t], A.T),
+        )
+        + q_dist[1][t + 1]
+        - Vt1t_A
+        - Vt1t_A.T
+    )
+Q_new = (1/(T-1)) * Q_new
+
+print(f"Q all close: {jnp.allclose(Q_new, pkf_Q)}")
+print(Q_new.round(2))
+print(pkf_Q.round(2))
 # %%
 # @jax.jit
 # def single_iter(carry, i):
@@ -150,26 +193,36 @@ jnp.allclose(pkf_cross_cov, cross_cov)
 
 #     return (A, b, Q, R, H), i
 # (A, b, Q, R, H), _ = jax.lax.scan(single_iter, (A, b, Q, R, H), jnp.arange(1000))
+m_step_update = jax.jit(KalmanFilter.m_step_update)
 
 for i in range(1):
     pkf = pkf.em(X=x[0][1:], n_iter=1, em_vars=["transition_covariance"])
-    print(pkf.transition_covariance)
-    pkf_q_dist = pkf.smooth(x[0][1:])
 
     f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
     q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
 
-    # H, R, A, Q, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, J_t, A, Q, H, R)
-    _, _, _, Q, _ = KalmanFilter.m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, J_t, A, Q, H, R)
-    print(Q)
+    H_new, R_new, A_new, Q_new, _ = m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, J_t, A, b, Q, H, R)
+    
+    print(f"Q all close: {jnp.allclose(Q_new, pkf_Q)}")
+    print(Q_new.round(2))
+    print(pkf.transition_covariance.round(2))
 
-    # print(jnp.any(jnp.isnan(jnp.linalg.cholesky(Q))))
+    # H = H_new
+    # R = R_new
+    # A = A_new
+    Q = Q_new
 
+    print(jnp.any(jnp.isnan(jnp.linalg.cholesky(Q))))
+
+f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
+q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+
+pkf_q_dist = pkf.smooth(x[0][1:])
 
 plt.scatter(*x[0].T, color='black')
 plt.plot(*(H@q_dist[0].T))
 plt.plot(*(H@pkf_q_dist[0].T), '--', linewidth=1)
-A, b, Q, R, H
+# A, b, Q, R, H
 # %%
 print("q_dist cov trace", jnp.trace(q_dist[1], axis1=1, axis2=2))
 print("p_dist cov trace", jnp.trace(p_dist[1], axis1=1, axis2=2))
