@@ -19,7 +19,7 @@ from lib.priors import KalmanFilter, KalmanFilter_MOTPDA, KalmanFilter_MOTCAVI
 from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply, MVN_Type, MVN_inverse_bayes
 
 from pykalman import KalmanFilter as PyKalmanFilter
-from pykalman.standard import _em_transition_covariance, _em_transition_matrix
+from pykalman.standard import _em_transition_covariance, _em_transition_matrix, _smooth_pair, _filter, _smooth, _loglikelihoods
 
 jax.config.update("jax_enable_x64", True)
 # %%
@@ -134,52 +134,52 @@ plt.plot(*(H@q_dist[0].T))
 plt.plot(*(H@pkf_q_dist[0].T), '--', linewidth=1)
 A, b, Q, R, H
 # %%
-k = f_dist[0].shape[-1]
-T = f_dist[0].shape[0]
-elementwise_outer = jax.vmap(jnp.outer)
+# k = f_dist[0].shape[-1]
+# T = f_dist[0].shape[0]
+# elementwise_outer = jax.vmap(jnp.outer)
 
-sigma_t_and_t_sub_1_given_T = KalmanFilter.cross_covariance(q_dist, J_t)
-mu_t_given_T = q_dist[0]
+# sigma_t_and_t_sub_1_given_T = KalmanFilter.cross_covariance(q_dist, J_t)
+# mu_t_given_T = q_dist[0]
 
-P_t = q_dist[1] + elementwise_outer(mu_t_given_T, mu_t_given_T)
-P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T + elementwise_outer(mu_t_given_T[1:], mu_t_given_T[:-1])
+# P_t = q_dist[1] + elementwise_outer(mu_t_given_T, mu_t_given_T)
+# P_t_and_t_sub_1 = sigma_t_and_t_sub_1_given_T + elementwise_outer(mu_t_given_T[1:], mu_t_given_T[:-1])
 
-A_new = jnp.linalg.solve(P_t[:-1].sum(axis=0).T, P_t_and_t_sub_1.sum(axis=0).T).T
-pkf_A = _em_transition_matrix(b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T)))
+# A_new = jnp.linalg.solve(P_t[:-1].sum(axis=0).T, P_t_and_t_sub_1.sum(axis=0).T).T
+# pkf_A = _em_transition_matrix(b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T)))
 
-print(f"A all close: {jnp.allclose(A_new, pkf_A)}")
-# print(A_new.round(3))
-# print(pkf_A.round(3))
+# print(f"A all close: {jnp.allclose(A_new, pkf_A)}")
+# # print(A_new.round(3))
+# # print(pkf_A.round(3))
 
-pkf_Q = _em_transition_covariance(A, b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T)))
+# pkf_Q = _em_transition_covariance(A, b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T)))
 
-# Q_new = 1/(T-1) * (
-#     P_t[1:] - P_t_and_t_sub_1 @ A.T - A_new @ jnp.moveaxis(P_t_and_t_sub_1, -1, -2) + A @ P_t[:-1] @ A.T
-# ).sum(axis=0)
-# Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0).T)
-Q_new = jnp.zeros((k, k))
-for t in range(T - 1):
-    err = (
-        q_dist[0][t + 1]
-        - jnp.dot(A, q_dist[0][t])
-        - b
-    )
-    Vt1t_A = jnp.dot(jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T))[t+1], A.T)
-    Q_new += (
-        jnp.outer(err, err)
-        + jnp.dot(
-            A,
-            jnp.dot(q_dist[1][t], A.T),
-        )
-        + q_dist[1][t + 1]
-        - Vt1t_A
-        - Vt1t_A.T
-    )
-Q_new = (1/(T-1)) * Q_new
+# # Q_new = 1/(T-1) * (
+# #     P_t[1:] - P_t_and_t_sub_1 @ A.T - A_new @ jnp.moveaxis(P_t_and_t_sub_1, -1, -2) + A @ P_t[:-1] @ A.T
+# # ).sum(axis=0)
+# # Q_new = (1/(T-1)) * (P_t[1:].sum(axis=0) - A_new @ P_t_and_t_sub_1.sum(axis=0).T)
+# Q_new = jnp.zeros((k, k))
+# for t in range(T - 1):
+#     err = (
+#         q_dist[0][t + 1]
+#         - jnp.dot(A, q_dist[0][t])
+#         - b
+#     )
+#     Vt1t_A = jnp.dot(jnp.concat((jnp.zeros((1,k,k)), sigma_t_and_t_sub_1_given_T))[t+1], A.T)
+#     Q_new += (
+#         jnp.outer(err, err)
+#         + jnp.dot(
+#             A,
+#             jnp.dot(q_dist[1][t], A.T),
+#         )
+#         + q_dist[1][t + 1]
+#         - Vt1t_A
+#         - Vt1t_A.T
+#     )
+# Q_new = (1/(T-1)) * Q_new
 
-print(f"Q all close: {jnp.allclose(Q_new, pkf_Q)}")
-print(Q_new.round(2))
-print(pkf_Q.round(2))
+# print(f"Q all close: {jnp.allclose(Q_new, pkf_Q)}")
+# print(Q_new.round(2))
+# print(pkf_Q.round(2))
 # %%
 # @jax.jit
 # def single_iter(carry, i):
@@ -195,15 +195,29 @@ print(pkf_Q.round(2))
 # (A, b, Q, R, H), _ = jax.lax.scan(single_iter, (A, b, Q, R, H), jnp.arange(1000))
 m_step_update = jax.jit(KalmanFilter.m_step_update)
 
-for i in range(1):
+log_likelihood = []
+# %%
+for i in range(10):
     pkf = pkf.em(X=x[0][1:], n_iter=1, em_vars=["transition_covariance"])
 
-    f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
+    # f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
+    p_dist_0, p_dist_1, _, f_dist_0, f_dist_1, = _filter(A, H, Q, R, b, jnp.zeros(2), z_t_sub_1[0], z_t_sub_1[1], x[0][1:])
+    p_dist = (p_dist_0, p_dist_1)
+    f_dist = (f_dist_0, f_dist_1)
+    
     q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+    # q_dist_0, q_dist_1, J_t = _smooth(A, *f_dist, *p_dist)
+    # q_dist = (q_dist_0, q_dist_1)
+
+    log_likelihood.append(KalmanFilter.joint_log_likelihood((x[0][1:], x[1][1:]), q_dist, A, b, Q, H))
+    # log_likelihood.append(_loglikelihoods(H, jnp.zeros((2)), R, *q_dist, x[0][1:]).sum())
 
     H_new, R_new, A_new, Q_new, _ = m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, J_t, A, b, Q, H, R)
-    
-    print(f"Q all close: {jnp.allclose(Q_new, pkf_Q)}")
+    # sigma_t_and_t_sub_1_given_T = KalmanFilter.cross_covariance(q_dist, J_t)
+    # sigma_t_and_t_sub_1_given_T = _smooth_pair(q_dist[1], J_t)[1:]
+    # Q_new = _em_transition_covariance(A, b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,4,4)), sigma_t_and_t_sub_1_given_T)))
+
+    print(f"Q all close: {jnp.allclose(Q_new, pkf.transition_covariance)}")
     print(Q_new.round(2))
     print(pkf.transition_covariance.round(2))
 
@@ -214,8 +228,12 @@ for i in range(1):
 
     print(jnp.any(jnp.isnan(jnp.linalg.cholesky(Q))))
 
-f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+# f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
+# q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+p_dist_0, p_dist_1, _, f_dist_0, f_dist_1, = _filter(A, H, Q, R, b, jnp.zeros(2), z_t_sub_1[0], z_t_sub_1[1], x[0][1:])
+p_dist = (p_dist_0, p_dist_1)
+f_dist = (f_dist_0, f_dist_1)
+q_dist_0, q_dist_1, J_t = _smooth(A, *f_dist, *p_dist)
 
 pkf_q_dist = pkf.smooth(x[0][1:])
 
@@ -224,9 +242,5 @@ plt.plot(*(H@q_dist[0].T))
 plt.plot(*(H@pkf_q_dist[0].T), '--', linewidth=1)
 # A, b, Q, R, H
 # %%
-print("q_dist cov trace", jnp.trace(q_dist[1], axis1=1, axis2=2))
-print("p_dist cov trace", jnp.trace(p_dist[1], axis1=1, axis2=2))
-
-print(jnp.allclose(p_dist[1], jnp.moveaxis(p_dist[1], -1, -2)))
-print(jnp.allclose(q_dist[1], jnp.moveaxis(q_dist[1], -1, -2)))
+plt.plot(log_likelihood)
 # %%

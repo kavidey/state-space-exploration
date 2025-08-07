@@ -253,6 +253,25 @@ class KalmanFilter:
         return q_dist[1][1:] @ jnp.moveaxis(J_t, -1, -2)
 
     @staticmethod
+    def joint_log_likelihood(x_t: MVN_Type, z_t: MVN_Type, A: Array, b: Array, Q: Array, H: Array):
+        T = x_t[0].shape[0]
+        # MVN_log_likelihood_mapped = jax.vmap(MVN_log_likelihood)
+        # log_likelihood = (
+        #     jnp.log(MVN_log_likelihood_mapped(jax.vmap(lambda z_t: KalmanFilter.predict(z_t, A, b, Q)[0])((z_t[0][:-1], z_t[1][:-1])), jnp.broadcast_to(Q, (z_t[1][1:].shape)), z_t[0][1:])).sum()
+        #     + jnp.log(MVN_log_likelihood_mapped(H@z_t[0], x_t[1], x_t[0])).sum()
+        # )
+        # return log_likelihood
+        log_likelihood = 0
+        for t in range(1, T):
+            log_likelihood += jnp.log(MVN_log_likelihood(A @ z_t[0][t-1] + b, Q, z_t[0][t]))
+        for t in range(T):
+            log_likelihood += jnp.log(MVN_log_likelihood(H @ z_t[0][t], x_t[1][t], x_t[0][t]))
+        
+        log_likelihood = log_likelihood * (1/T)
+
+        return log_likelihood
+
+    @staticmethod
     def m_step_update(x: MVN_Type, z_t_sub_1: MVN_Type, p_dist: MVN_Type, f_dist: MVN_Type, q_dist: MVN_Type, J_t: Array, A: Array, b: Array, Q: Array, H: Array, R: Array):
         r"""
         Updates model parameters for kalman filter using the EM algorithm
