@@ -249,7 +249,7 @@ class KalmanFilter:
         ```
         """
 
-        # \Sigma_{t, t-1 | T} = \Sigma_{t|T} @ J_t-1
+        # \Sigma_{t, t-1 | T} = \Sigma_{t|T} @ J_t-1^T
         return q_dist[1][1:] @ jnp.moveaxis(J_t, -1, -2)
 
     @staticmethod
