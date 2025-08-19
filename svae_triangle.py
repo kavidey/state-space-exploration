@@ -1,6 +1,5 @@
 # %%
 import time
-from typing import Tuple
 from pathlib import Path
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
@@ -21,29 +20,36 @@ import optax
 import orbax.checkpoint as ocp
 
 from tensorflow_probability.substrates import jax as tfp
+tfd = tfp.distributions
 tfb = tfp.bijectors
+# tfpk = tfp.math.psd_kernels
 
-from lib.distributions import MultivariateNormalFullCovariance
+from lib.distributions import MVN_kl_divergence
 from lib.priors import KalmanFilter
 
-from dynamax.linear_gaussian_ssm import LinearGaussianSSM, parallel_lgssm_smoother
+import sys
+sys.path.insert(1, 'dynamax') # import dev version of dynamax submodule
+from dynamax.linear_gaussian_ssm import LinearGaussianSSM, lgssm_smoother, lgssm_filter
+from dynamax.linear_gaussian_ssm import EmissionDynamicCovariance
 
+# jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_enable_x64", True)
 # %%
-key = jnr.PRNGKey(42)
+key = jnr.PRNGKey(43)
 
-warmup_epochs = 125
-warmup_kl_weight = 0.1
+warmup_epochs = 75
+warmup_kl_weight = 0.005
 
 epochs = 500
 batch_size = 32
 latent_dims = 4
 
-kl_weight = 0.2
+kl_weight = 0.1
+kl_ramp = 30 # The epoch where the KL weight reaches its final value
 
 A_init_epsilon = 0.01
 Q_init_stdev = 0.02
-model_name = f"svae_lds.ptr_{warmup_epochs}_{warmup_kl_weight}.klw_{kl_weight:.2f}.ep_{epochs}"
+model_name = f"svae_lds.ptr_{warmup_epochs}_{warmup_kl_weight}.klw_{kl_weight:.2f}.klr_{kl_ramp}.ep_{epochs}"
 
 checkpoint_path = (Path("vae_checkpoints") / f"{model_name}_{time.strftime('%Y%m%d-%H%M%S')}").absolute()
 checkpoint_path.mkdir(parents=True)
@@ -136,7 +142,7 @@ class Encoder(nn.Module):
         logvar = nn.Dense(latent_dims, name="enc_fc2_logvar")(x)
         sigma = jnp.exp(logvar * 0.5)
 
-        return MultivariateNormalFullCovariance(xhat, jax.vmap(jnp.diag)(sigma))
+        return xhat, jax.vmap(jnp.diag)(sigma)
 
 
 class Decoder(nn.Module):
@@ -153,7 +159,7 @@ class VAE(nn.Module):
     @nn.compact
     def __call__(self, x, z_rng):
         z = Encoder(latent_dims=self.latent_dims, name="encoder")(x)
-        z_sample = z.sample(z_rng)
+        z_sample = jnr.multivariate_normal(z_rng, z[0], z[1])
         x_recon = Decoder(name="decoder")(z_sample)
 
         return x_recon, z
@@ -180,44 +186,42 @@ class SVAE_LDS(nn.Module):
         self.Q_param = self.param(
             "kf_Q", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
         )
-        self.R_param = self.param(
-            "kf_R", nn.initializers.normal(Q_init_stdev), (int(self.latent_dims*(self.latent_dims+1)/2),)
-        )
 
-        # Initialize Dynamax LGSSM
-        self.lgssm = LinearGaussianSSM(self.latent_dims, self.latent_dims)
+        self.lgssm = LinearGaussianSSM(latent_dims, latent_dims, has_emissions_bias=False, has_dynamics_bias=True)
 
-    def __call__(self, x, z_rng):
+    def __call__(self, x, mask, z_rng):
+        '''
+        mask should be 1 for masked items and 0 for available ones
+        '''
         z_hat = self.encoder(x)
 
-        z_t_sub_1 = MultivariateNormalFullCovariance(
+        z_0 = (
             jnp.zeros((self.latent_dims),), jnp.eye(self.latent_dims)
         )
 
-        params, _ = self.lgssm.initialize(
-            initial_mean=z_t_sub_1.mean(),
-            initial_covariance=z_t_sub_1.covariance(),
-            dynamics_weights=self.A,
-            dynamics_bias=self.b,
-            dynamics_covariance=self.Q(),
-            emission_weights=jnp.eye(self.latent_dims),
-            emission_covariance=self.R())
+        # f_dist, p_dist, marginal_loglik = KalmanFilter.run_forward(z_hat, z_0, self.A, self.b, self.Q(), jnp.eye(self.latent_dims), mask=mask)
+        # q_dist, _ = KalmanFilter.run_backward(f_dist, self.A, self.b, self.Q(), jnp.eye(self.latent_dims))
+
+        params, _ = self.lgssm.initialize(jnr.PRNGKey(0),
+                        initial_mean=z_0[0],
+                        initial_covariance=z_0[1],
+                        dynamics_weights=self.A,
+                        dynamics_bias=self.b,
+                        dynamics_covariance=self.Q(),
+                        emission_weights=jnp.eye(self.latent_dims))
         
-        parallel_posterior = parallel_lgssm_smoother(params, z_hat.mean())
-
-        # Dynamax does not provide the output of the predict step. Only the filter and smooth steps
-        # to calculate the predict step sequence we take (prior, predict(filter_{t-1}))
-        f_dist = MultivariateNormalFullCovariance(parallel_posterior.filtered_means, parallel_posterior.filtered_covariances)
-        p_dist = MultivariateNormalFullCovariance(
-            jnp.vstack((jnp.expand_dims(z_t_sub_1.mean(), axis=0),
-                        jax.vmap(lambda m: (self.A @ m) + self.b)(f_dist.mean()[:-1]))),
-            jnp.vstack((jnp.expand_dims(z_t_sub_1.covariance(), axis=0),
-                        jax.vmap(lambda cov: (self.A @ cov @ self.A.T) + self.Q())(f_dist.covariance()[:-1]))),
+        emissions = EmissionDynamicCovariance(*z_hat)
+        lgssm_out = self.lgssm.smoother(params, emissions)
+        f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
+        p_dist = (
+            jnp.vstack((jnp.expand_dims(z_0[0], axis=0), jax.vmap(lambda m: self.A @ m)(f_dist[0][:-1]))),
+            jnp.vstack((jnp.expand_dims(z_0[1], axis=0), jax.vmap(lambda cov: (self.A @ cov @ self.A.T) + self.Q())(f_dist[1][:-1])))
         )
-        q_dist = MultivariateNormalFullCovariance(parallel_posterior.smoothed_means, parallel_posterior.smoothed_covariances)
-        marginal_loglik = parallel_posterior.marginal_loglik
+        q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
+        # kl divergence code expects a separate loglik for each timestep, so spread the average over all
+        marginal_loglik = jnp.ones(z_hat[0].shape[0]) * lgssm_out.marginal_loglik / z_hat[0].shape[0]
 
-        z_recon = q_dist.sample(z_rng)
+        z_recon = jnr.multivariate_normal(z_rng, q_dist[0], q_dist[1])
         x_recon = self.decoder(z_recon)
 
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
@@ -225,32 +229,12 @@ class SVAE_LDS(nn.Module):
     def Q(self):
         return vec_to_cov_cholesky.forward(self.Q_param)
     
-    def R(self):
-        return vec_to_cov_cholesky.forward(self.R_param)
-    
 Batched_SVAE_LDS = nn.vmap(SVAE_LDS, 
     in_axes=0, out_axes=0,
     variable_axes={'params': None},
     split_rngs={'params': False}
 )
 # %% VAE Train Code
-def kl_divergence(
-    q: MultivariateNormalFullCovariance, p: MultivariateNormalFullCovariance
-):
-    mu_0 = q.mean()
-    sigma_0 = q.covariance()
-
-    mu_1 = p.mean()
-    sigma_1 = p.covariance()
-
-    k = mu_0.shape[-1]
-
-    # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
-    a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
-    mean_diff = mu_1 - mu_0
-    b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
-    c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
-    return 0.5 * (a + b - k + c)
 
 def create_train_step_warmup(
             key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
@@ -265,8 +249,8 @@ def create_train_step_warmup(
 
         def unbatched_loss(x, recon, q_dist):
             mse_loss = optax.l2_loss(recon, x)
-            k = q_dist.mean().shape[1]
-            kl_loss = jax.vmap(lambda q_dist: kl_divergence(q_dist, MultivariateNormalFullCovariance(jnp.zeros((k)), jnp.eye(k))))(q_dist)
+            k = q_dist[0].shape[1]
+            kl_loss = jax.vmap(lambda q_dist: MVN_kl_divergence(q_dist[0], q_dist[1], jnp.zeros((k)), jnp.eye(k)))(q_dist)
 
             return mse_loss, kl_loss
         
@@ -337,7 +321,7 @@ ax[0].set_title('Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Each Dimension of the Latent Variable')
 
 plt.show()
@@ -345,23 +329,23 @@ plt.show()
 def create_train_step(
     key: jnr.PRNGKey, model: nn.Module, optimizer: optax.GradientTransformation
 ):
-    params = model.init(key, setup_batch, jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
+    params = model.init(key, setup_batch, jnp.zeros(setup_batch.shape[:2]), jnr.split(jnr.PRNGKey(0), setup_batch.shape[0]))
     opt_state = optimizer.init(params)
 
-    def loss_fn(params, x, key, kl_weight):
+    def loss_fn(params, x, mask, key, kl_weight):
         bs = x.shape[0]
 
-        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, jnr.split(key, x.shape[0]))
+        recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, mask, jnr.split(key, x.shape[0]))
 
         def unbatched_loss(x, recon, z_hat, q_dist, f_dist, p_dist, marginal_loglik):
             mse_loss = optax.l2_loss(recon, x)
             
-            def observation_likelihood(z_hat: MultivariateNormalFullCovariance, q_z: MultivariateNormalFullCovariance, p_z: MultivariateNormalFullCovariance):
-                k = z_hat.mean().shape[-1]
+            def observation_likelihood(z_hat, q_z, p_z):
+                k = z_hat[0].shape[-1]
                 # -1/2 ( k*log(2pi) + log(det(Sigma_i)) + (x_i - mu_i)^T @ Sigma_i^-1 @ (x_i - mu_i) + tr(P_i Sigma_i^-1) )
-                mean_diff = z_hat.mean() - q_z.mean()
-                inv_cov = jnp.linalg.inv(z_hat.covariance())
-                return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat.covariance())) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z.covariance() @ inv_cov))
+                mean_diff = z_hat[0] - q_z[0]
+                inv_cov = jnp.linalg.inv(z_hat[1])
+                return -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(z_hat[1])) + mean_diff.T @ inv_cov @ mean_diff + jnp.linalg.trace(q_z[1] @ inv_cov))
             
             kl_loss = jax.vmap(observation_likelihood)(z_hat, q_dist, p_dist) - marginal_loglik
             
@@ -375,8 +359,8 @@ def create_train_step(
         return loss, (mse_loss, kl_loss)
 
     @jax.jit
-    def train_step(params, opt_state, x, key, kl_weight):
-        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, key, kl_weight)
+    def train_step(params, opt_state, x, mask, key, kl_weight):
+        losses, grads = jax.value_and_grad(loss_fn, has_aux=True)(params, x, mask, key, kl_weight)
 
         loss, (mse_loss, kl_loss) = losses
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -408,7 +392,7 @@ running_loss = []
 running_mse = []
 running_kl = []
 
-pbar = tqdm(range(epochs))
+pbar = tqdm(range(epochs + kl_ramp))
 for epoch in pbar:
     total_loss, total_mse, total_kl = 0.0, 0.0, 0.0
     for i, batch in enumerate(train_dataloader):
@@ -416,7 +400,7 @@ for epoch in pbar:
 
         batch = process_batch(batch)
         params1, opt_state, loss, mse_loss, kl_loss = train_step(
-            params, opt_state, batch, subkey, kl_weight
+            params, opt_state, batch, jnp.zeros(batch.shape[:2]), subkey, min(epoch / kl_ramp, 1) * kl_weight
         )
 
         contains_nan = False
@@ -454,8 +438,8 @@ restored_params = mngr.restore(mngr.latest_step(), params)
 
 def create_pred_step(model: nn.Module, params):
     @jax.jit
-    def pred_step(x, key):
-        x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, jnr.split(key, x.shape[0]))
+    def pred_step(x, mask, key):
+        x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = model.apply(params, x, mask, jnr.split(key, x.shape[0]))
         return x_recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik
     
     return pred_step
@@ -468,7 +452,7 @@ print("A", restored_params["params"]["kf_A"])
 print("b", restored_params["params"]["kf_b"])
 print("Q", vec_to_cov_cholesky.forward(restored_params["params"]["kf_Q"]))
 # %% LDS Reconstruction
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch, key)
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch, jnp.zeros(sample_batch.shape[:2]), key)
 f, ax = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
 i = 0
@@ -479,16 +463,17 @@ ax[0].set_title('Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist.covariance()[i]))
+ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
 ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 plt.show()
 # %% LDS Imputation
-masked_batch = sample_batch.at[:,10:40].set(0)
-recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(masked_batch, key)
+mask = jnp.zeros(sample_batch.shape[:2]).at[:, 10:40].set(1)
+masked_batch = sample_batch * jnp.logical_not(mask)[:, :, None]
+recon, z_recon, z_hat, f_dist, q_dist, p_dist, marginal_loglik = pred_step(sample_batch, mask, key)
 
 f, ax = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
 f.tight_layout()
@@ -500,10 +485,10 @@ ax[0].set_title('Masked Sequence')
 ax[1].imshow(recon[i].T, aspect='auto', vmin=-0.3, vmax=1.3)
 ax[1].set_title('Reconstruction')
 
-ax[2].plot(q_dist.mean()[i])
+ax[2].plot(q_dist[0][i])
 ax[2].set_title('Latent Posterior Mean')
 
-ax[3].plot(jax.vmap(jnp.diag)(q_dist.covariance()[i]))
+ax[3].plot(jax.vmap(jnp.diag)(q_dist[1][i]))
 ax[3].set_title('Latent Posterior Covariance (diagonal elements)')
 
 ax[4].plot(z_recon[i])
