@@ -3,11 +3,14 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from functools import partial
+
 %config InlineBackend.figure_format = 'retina'
 
 import jax
 import jax.numpy as jnp
 import jax.random as jnr
+from jax.tree_util import tree_map
 from jax import Array
 
 from tensorflow_probability.substrates import jax as tfp
@@ -16,11 +19,11 @@ tfb = tfp.bijectors
 
 import torch
 
-from lib.priors import KalmanFilter, KalmanFilter_MOTPDA, KalmanFilter_MOTCAVI
-from lib.distributions import MVN_kl_divergence, GMM_moment_match, MVN_multiply, MVN_Type, MVN_inverse_bayes
-
-from pykalman import KalmanFilter as PyKalmanFilter
-from pykalman.standard import _em_transition_covariance, _em_transition_matrix, _smooth_pair, _filter, _smooth, _loglikelihoods
+import sys
+sys.path.insert(1, 'dynamax') # import dev version of dynamax submodule
+from dynamax.utils.plotting import plot_uncertainty_ellipses
+from dynamax.linear_gaussian_ssm import LinearGaussianSSM, lgssm_smoother, lgssm_filter
+from dynamax.linear_gaussian_ssm import EmissionDynamicCovariance, EmissionConstantCovariance
 
 jax.config.update("jax_enable_x64", True)
 # %%
@@ -60,6 +63,8 @@ test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), ba
 process_batch = lambda x: jnp.array(x, dtype='float64')
 setup_batch = process_batch(next(iter(train_dataloader)))
 
+lgssm = LinearGaussianSSM(latent_dims, pos_dims, has_emissions_bias=False, has_dynamics_bias=True)
+
 i = 0
 for j in range(num_balls):
     plt.scatter(setup_batch[i,:,j, -pos_dims], setup_batch[i,:,j, -pos_dims+1])
@@ -70,31 +75,31 @@ plt.ylim(-1, 1)
 # %%
 A = jnp.array([[1, 0, 0.1, 0], [0, 1, 0, 0.1], [0,0,1,0], [0,0,0,1]])
 b = jnp.zeros((4))
-Q = jnp.eye(4) * 0.05
-R = jnp.eye(2) * 0.1
+Q = jnp.eye(4) * 0.001
+R = jnp.eye(2) * 0.001
 H = jnp.array([[1,0,0,0],[0,1,0,0]])
 
+
 x = (setup_batch[0,:,0,:num_balls], jnp.broadcast_to(R, (50, 2,2)))
-z_t_sub_1 = (jnp.append(x[0][0], jnp.zeros(2)), Q)
-f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-q_dist, _ = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+z_0 = (jnp.append(x[0][0], jnp.zeros(2)), Q)
 
-pkf = PyKalmanFilter(A, H, Q, R, b, jnp.zeros((2,)), z_t_sub_1[0], z_t_sub_1[1],
-    em_vars=[
-        "transition_matrices",
-        "observation_matrices",
-        "transition_covariance",
-        "observation_covariance",
-        "observation_offsets",
-        "initial_state_mean",
-        "initial_state_covariance",
-    ],
-)
-pkf_q_dist = pkf.smooth(x[0][1:])
+params, _ = lgssm.initialize(jnr.PRNGKey(0),
+                             initial_mean=z_0[0],
+                             initial_covariance=z_0[1],
+                             dynamics_weights=A,
+                             dynamics_covariance=Q,
+                             emission_weights=H,
+                             emission_covariance=R)
+emissions = EmissionDynamicCovariance(x[0][1:], x[1][1:])
+lgssm_out = lgssm.smoother(params, emissions)
+f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
+log_lik_true = lgssm_out.marginal_loglik
+q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
 
-plt.scatter(*x[0].T, color='black')
+fig, ax = plt.subplots()
+ax.scatter(*x[0].T, color='black')
 plt.plot(*(H@q_dist[0].T))
-plt.plot(*(H@pkf_q_dist[0].T), '--', linewidth=1)
+plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": "tab:blue", "linewidth": 1})
 A, b, Q, R, H
 # %% [markdown]
 # use EM to optimize parameters
@@ -105,98 +110,69 @@ vec_to_cov_cholesky = tfb.Chain([
 ])
 
 key, tmpkey = jnr.split(key)
-# A = (jnp.eye(4) + jnr.normal(key, (4,4)) * 0.1).round(2)
-# b = jnp.zeros((4))
-# key, tmpkey = jnr.split(key)
-Q = vec_to_cov_cholesky.forward(jnr.normal(key, (int(latent_dims*(latent_dims+1)/2),)) * 0.1).round(2)
-# key, tmpkey = jnr.split(key)
-# R = vec_to_cov_cholesky.forward(jnr.normal(key, ((int(pos_dims*(pos_dims+1)/2)))) * 0.1).round(2)
-# key, tmpkey = jnr.split(key)
-# H = (jnp.array([[1,0,0,0],[0,1,0,0]]) + jnr.normal(key, (2,4)) * 0.5).round(2)
+A = (jnp.eye(4) + jnr.normal(key, (4,4)) * 0.1).round(2)
+b = jnp.zeros((4))
+key, tmpkey = jnr.split(key)
+Q = vec_to_cov_cholesky.forward(jnr.normal(key, (int(latent_dims*(latent_dims+1)/2),)) * 0.1).round(2) * 0.01
+key, tmpkey = jnr.split(key)
+R = vec_to_cov_cholesky.forward(jnr.normal(key, ((int(pos_dims*(pos_dims+1)/2)),)) * 0.1).round(2) * 0.01
+key, tmpkey = jnr.split(key)
+H = (jnp.array([[1,0,0,0],[0,1,0,0]]) + jnr.normal(key, (2,4)) * 0.05).round(2)
 
-f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
+params, _ = lgssm.initialize(jnr.PRNGKey(0),
+                             initial_mean=z_0[0],
+                             initial_covariance=z_0[1],
+                             dynamics_weights=A,
+                             dynamics_covariance=Q,
+                             emission_weights=H,
+                             emission_covariance=R)
+emissions = EmissionConstantCovariance(x[0][1:], R)
+lgssm_out = lgssm.smoother(params, emissions)
+f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
+log_lik = lgssm_out.marginal_loglik
+q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
 
-pkf = PyKalmanFilter(A, H, Q, R, b, jnp.zeros((2,)), z_t_sub_1[0], z_t_sub_1[1],
-    em_vars=[
-        "transition_matrices",
-        "observation_matrices",
-        "transition_covariance",
-        "observation_covariance",
-        "observation_offsets",
-        "initial_state_mean",
-        "initial_state_covariance",
-    ],
-)
-pkf_q_dist = pkf.smooth(x[0][1:])
-
-plt.scatter(*x[0].T, color='black')
-plt.plot(*(H@q_dist[0].T))
-plt.plot(*(H@pkf_q_dist[0].T), '--', linewidth=1)
-A, b, Q, R, H
+fig, ax = plt.subplots()
+ax.scatter(*x[0].T, color='black')
+ax.plot(*(H@q_dist[0].T))
+plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": "tab:blue", "linewidth": 1})
+params
 # %%
-Q = vec_to_cov_cholesky.forward(jnr.normal(key, (int(latent_dims*(latent_dims+1)/2),)) * 0.1).round(2)
-m_step_update = jax.jit(KalmanFilter.m_step_update)
+num_iters = 50
 
-log_likelihood = []
+@jax.jit
+def em_step(params, m_step_state):
+    """Perform one EM step."""
+    emissions = EmissionConstantCovariance(x[0][1:], params.emissions.cov)
+    stats, ll = lgssm.e_step(params, emissions)
+    batch_stats, lls = tree_map(partial(jnp.expand_dims, axis=0), (stats, ll)) # add fake batch dimension
+    lp = lgssm.log_prior(params) + lls.sum()
+    params, m_step_state = lgssm.m_step(params, None, batch_stats, m_step_state)
+    return params, m_step_state, lp
 
-for i in tqdm(range(100)):
-    pkf = pkf.em(X=x[0][1:], n_iter=1, em_vars=["transition_covariance"])
-
-    # OURS
-    f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-    # THEIRS
-    # p_dist_0, p_dist_1, _, f_dist_0, f_dist_1, = _filter(A, H, Q, R, b, jnp.zeros(2), z_t_sub_1[0], z_t_sub_1[1], x[0][1:])
-    # p_dist = (p_dist_0, p_dist_1)
-    # f_dist = (f_dist_0, f_dist_1)
-    
-    # OURS
-    q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
-    # THEIRS
-    # q_dist_0, q_dist_1, J_t = _smooth(A, *f_dist, *p_dist)
-    # q_dist = (q_dist_0, q_dist_1)
-
-    # OURS
-    log_likelihood.append(KalmanFilter.joint_log_likelihood((x[0][1:], x[1][1:]), q_dist, A, b, Q, H))
-    # THEIRS
-    # log_likelihood.append(_loglikelihoods(H, jnp.zeros((2)), R, *q_dist, x[0][1:]).sum())
-
-    # OURS
-    H_new, R_new, A_new, Q_new, _ = m_step_update((x[0][1:], x[1][1:]), z_t_sub_1, p_dist, f_dist, q_dist, J_t, A, b, Q, H, R)
-    
-    # THEIRS
-    # sigma_t_and_t_sub_1_given_T = KalmanFilter.cross_covariance(q_dist, J_t) # OURS
-    # sigma_t_and_t_sub_1_given_T = _smooth_pair(q_dist[1], J_t)[1:] # THEIRS
-    # Q_new = _em_transition_covariance(A, b, q_dist[0], q_dist[1], jnp.concat((jnp.zeros((1,4,4)), sigma_t_and_t_sub_1_given_T)))
-
-    # print(f"Q all close: {jnp.allclose(Q_new, pkf.transition_covariance)}")
-    # print(Q_new.round(2))
-    # print(pkf.transition_covariance.round(2))
-
-    # H = H_new
-    # R = R_new
-    # A = A_new
-    Q = Q_new
-
-    if jnp.any(jnp.isnan(jnp.linalg.cholesky(Q))):
-        print("Q is invalid")
+log_probs = []
+log_prob_thresh = 0.5
+m_step_state = None
+for _ in range(num_iters):
+    params, m_step_state, marginal_logprob = em_step(params, m_step_state)
+    print(params)
+    log_probs.append(marginal_logprob)
+    if len(log_probs) > 2 and log_probs[-1] - log_probs[-2] < log_prob_thresh:
         break
 
-# OURS
-f_dist, p_dist, log_lik = KalmanFilter.run_forward((x[0][1:], x[1][1:]), z_t_sub_1, A, b, Q, H, jnp.zeros(49))
-q_dist, J_t = KalmanFilter.run_backward(f_dist, A, b, Q, H)
-# THEIRS
-# p_dist_0, p_dist_1, _, f_dist_0, f_dist_1, = _filter(A, H, Q, R, b, jnp.zeros(2), z_t_sub_1[0], z_t_sub_1[1], x[0][1:])
-# p_dist = (p_dist_0, p_dist_1)
-# f_dist = (f_dist_0, f_dist_1)
-# q_dist_0, q_dist_1, J_t = _smooth(A, *f_dist, *p_dist)
+lgssm_out = lgssm.smoother(params, emissions)
+f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
+log_lik = lgssm_out.marginal_loglik
+q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
 
-pkf_q_dist = pkf.smooth(x[0][1:])
-
-plt.scatter(*x[0].T, color='black')
-plt.plot(*(H@q_dist[0].T))
-plt.plot(*(H@pkf_q_dist[0].T), '--', linewidth=1)
-# A, b, Q, R, H
+fig, ax = plt.subplots()
+ax.scatter(*x[0].T, color='black')
+ax.plot(*(H@q_dist[0].T))
+plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": "tab:blue", "linewidth": 1})
+params
 # %%
-plt.plot(log_likelihood)
+plt.plot(log_probs)
+plt.xlabel("iteration")
+plt.ylabel("marginal log likelihood")
+plt.axhline(log_lik_true, color='k', linestyle='--')
 # %%
