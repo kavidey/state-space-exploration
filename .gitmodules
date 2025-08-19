@@ -1,0 +1,3 @@
+[submodule "dynamax"]
+	path = dynamax
+	url = git@github.com:kavidey/dynamax.git

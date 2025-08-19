@@ -4,6 +4,7 @@
         "bijector",
         "bijectors",
         "checkify",
+        "covs",
         "dset",
         "fori",
         "lgssm",
