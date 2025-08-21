@@ -44,20 +44,20 @@ train = jnp.concat([train_dset['y'][:1024, ..., :2]]*2, axis=-1)
 test = jnp.concat([test_dset['y'][:1024, ..., :2]]*2, axis=-1)
 latent_dims = 4
 pos_dims = 2
-num_balls = 2
+num_balls = 3
 
-noise_amt = 0.15
+noise_amt = 0.10
 key, tmpkey = jnr.split(key)
-train = jnp.concat((train[:, :, :1], train[:, :, :1]), axis=2)
+train = jnp.concat((train[:, :, :1], train[:, :, :1], train[:, :, 2:3]), axis=2)
 train += jnr.normal(tmpkey, train.shape) * noise_amt
 key, tmpkey = jnr.split(key)
-test = jnp.concat((test[:, :, :1], test[:, :, :1]), axis=2)
+test = jnp.concat((test[:, :, :1], test[:, :, :1], test[:, :, 2:3]), axis=2)
 test += jnr.normal(tmpkey, test.shape) * noise_amt
 
 train = train/5-1
 test = test/5-1
 
-train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=False)
+train_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(train)), batch_size=batch_size, shuffle=True)
 test_dataloader = torch.utils.data.DataLoader(torch.tensor(np.asarray(test)), batch_size=batch_size, shuffle=False)
 
 process_batch = lambda x: jnp.array(x, dtype='float64')
@@ -80,26 +80,30 @@ R = jnp.eye(2) * 0.001
 H = jnp.array([[1,0,0,0],[0,1,0,0]])
 
 
-x = (setup_batch[0,:,:,:pos_dims], jnp.broadcast_to(R, (50, 2, 2, 2)))
-z_0 = (jnp.append(x[0][0][0], jnp.zeros(2)), Q)
-
-params, _ = lgssm.initialize(jnr.PRNGKey(0),
-                             initial_mean=z_0[0],
-                             initial_covariance=z_0[1],
-                             dynamics_weights=A,
-                             dynamics_covariance=Q,
-                             emission_weights=H,
-                             emission_covariance=R)
+x = (setup_batch[0,:,:,:pos_dims], jnp.broadcast_to(R, (50, num_balls, 2, 2)))
 emissions = EmissionPDA(x[0][1:], x[1][1:], _condition_on, sharpening=10.0)
-lgssm_out = lgssm.smoother(params, emissions)
-f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
-log_lik_true = lgssm_out.marginal_loglik
-q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
 
 fig, ax = plt.subplots()
 ax.scatter(*x[0].T, color='black')
-plt.plot(*(H@q_dist[0].T))
-plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": "tab:blue", "linewidth": 1})
+colors = ['tab:blue', 'tab:orange', 'tab:red']
+
+for c,i in zip(colors,range(num_balls)):
+    z_0 = (jnp.append(x[0][0][i], jnp.zeros(2)), Q)
+
+    params, _ = lgssm.initialize(jnr.PRNGKey(0),
+                                initial_mean=z_0[0],
+                                initial_covariance=z_0[1],
+                                dynamics_weights=A,
+                                dynamics_covariance=Q,
+                                emission_weights=H,
+                                emission_covariance=R)
+    lgssm_out = lgssm.smoother(params, emissions)
+    f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
+    log_lik_true = lgssm_out.marginal_loglik
+    q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
+
+    plt.plot(*(H@q_dist[0].T), c=c)
+    plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": c, "linewidth": 1})
 A, b, Q, R, H
 # %% [markdown]
 # use EM to optimize parameters
@@ -119,23 +123,28 @@ R = vec_to_cov_cholesky.forward(jnr.normal(key, ((int(pos_dims*(pos_dims+1)/2)),
 key, tmpkey = jnr.split(key)
 H = (jnp.array([[1,0,0,0],[0,1,0,0]]) + jnr.normal(key, (2,4)) * 0.05).round(2)
 
-params, _ = lgssm.initialize(jnr.PRNGKey(0),
-                             initial_mean=z_0[0],
-                             initial_covariance=z_0[1],
-                             dynamics_weights=A,
-                             dynamics_covariance=Q,
-                             emission_weights=H,
-                             emission_covariance=R)
-emissions = EmissionPDA(x[0][1:], x[1][1:], _condition_on, sharpening=10.0)
-lgssm_out = lgssm.smoother(params, emissions)
-f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
-log_lik = lgssm_out.marginal_loglik
-q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
+emissions = EmissionPDA(x[0][1:], x[1][1:], _condition_on, sharpening=20.0)
 
 fig, ax = plt.subplots()
 ax.scatter(*x[0].T, color='black')
-ax.plot(*(H@q_dist[0].T))
-plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": "tab:blue", "linewidth": 1})
+colors = ['tab:blue', 'tab:orange', 'tab:red']
+
+for c,i in zip(colors,range(num_balls)):
+    z_0 = (jnp.append(x[0][0][i], jnp.zeros(2)), Q)
+    params, _ = lgssm.initialize(jnr.PRNGKey(0),
+                                initial_mean=z_0[0],
+                                initial_covariance=z_0[1],
+                                dynamics_weights=A,
+                                dynamics_covariance=Q,
+                                emission_weights=H,
+                                emission_covariance=R)
+    lgssm_out = lgssm.smoother(params, emissions)
+    f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
+    log_lik = lgssm_out.marginal_loglik
+    q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
+
+    plt.plot(*(H@q_dist[0].T), c=c)
+    plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": c, "linewidth": 1})
 params
 # %%
 num_iters = 50
@@ -143,7 +152,7 @@ num_iters = 50
 @jax.jit
 def em_step(params, m_step_state):
     """Perform one EM step."""
-    emissions = EmissionPDA(x[0][1:], jnp.broadcast_to(params.emissions.cov, x[1][1:].shape), _condition_on, sharpening=10.0)
+    emissions = EmissionPDA(x[0][1:], jnp.broadcast_to(params.emissions.cov, x[1][1:].shape), _condition_on, sharpening=20.0)
     stats, ll = lgssm.e_step(params, emissions)
     batch_stats, lls = tree_map(partial(jnp.expand_dims, axis=0), (stats, ll)) # add fake batch dimension
     lp = lgssm.log_prior(params) + lls.sum()
