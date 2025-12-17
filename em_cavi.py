@@ -89,12 +89,12 @@ def cavi_step(params, raw_emissions, beta, p_d=0.9, g=1, m_t=1):
 # %%
 A = jnp.array([[1, 0, 0.1, 0], [0, 1, 0, 0.1], [0,0,1,0], [0,0,0,1]])
 b = jnp.zeros((4))
-Q = jnp.eye(4) * 0.001
-R = jnp.eye(2) * 0.001
+Q = jnp.eye(4) * 0.01
+R = jnp.eye(2) * 0.01
 H = jnp.array([[1,0,0,0],[0,1,0,0]])
 
 p_d, g, m_t = 0.9, 1, 1
-cavi_iters = 1
+cavi_iters = 5
 cavi_lp_thresh = 0.5
 
 x = (setup_batch[0,:,:,:pos_dims], jnp.broadcast_to(R, (50, num_balls, 2, 2)))
@@ -139,6 +139,14 @@ A, b, Q, R, H
 # %% [markdown]
 # use EM to optimize parameters
 # %%
+@partial(jax.jit, static_argnames=['steps'])
+def find_beta(raw_emissions, params, p_d, g, m_t, steps=5):
+    emissions = EmissionCAVI(*raw_emissions, p_d=p_d, g=g, m_t=m_t)
+    beta = emissions.initial_beta()
+
+    return jax.lax.scan(lambda beta, _: cavi_step(params, raw_emissions, beta),
+                        beta, xs=None, length=steps)
+# %%
 vec_to_cov_cholesky = tfb.Chain([
     tfb.CholeskyOuterProduct(),
     tfb.FillScaleTriL(diag_bijector=tfb.Exp(), diag_shift=None)
@@ -154,8 +162,6 @@ R = vec_to_cov_cholesky.forward(jnr.normal(key, ((int(pos_dims*(pos_dims+1)/2)),
 key, tmpkey = jnr.split(key)
 H = (jnp.array([[1,0,0,0],[0,1,0,0]]) + jnr.normal(key, (2,4)) * 0.05).round(2)
 
-emissions = EmissionPDA(x[0][1:], x[1][1:], _condition_on, sharpening=20.0)
-
 fig, ax = plt.subplots()
 ax.scatter(*x[0].T, color='black')
 colors = ['tab:blue', 'tab:orange', 'tab:red']
@@ -169,12 +175,17 @@ for c,i in zip(colors,range(num_balls)):
                                 dynamics_covariance=Q,
                                 emission_weights=H,
                                 emission_covariance=R)
+    
+    beta, lps = find_beta(raw_emissions, params, p_d=p_d, g=g, m_t=m_t, steps=cavi_iters)
+    emissions = EmissionCAVI(*raw_emissions, beta=beta, p_d=p_d, g=g, m_t=m_t)
+
     lgssm_out = lgssm.smoother(params, emissions)
     f_dist = (lgssm_out.filtered_means, lgssm_out.filtered_covariances)
     log_lik = lgssm_out.marginal_loglik
     q_dist = (lgssm_out.smoothed_means, lgssm_out.smoothed_covariances)
 
     plt.plot(*(H@q_dist[0].T), c=c)
+    plt.scatter([z_0[0][0]], [z_0[0][1]], c=c, s=100, alpha=0.5)
     plot_uncertainty_ellipses((H@q_dist[0].T).T, q_dist[1], ax, **{"edgecolor": c, "linewidth": 1})
 params
 # %%
@@ -183,7 +194,8 @@ num_iters = 50
 @jax.jit
 def em_step(params, m_step_state):
     """Perform one EM step."""
-    emissions = EmissionPDA(x[0][1:], jnp.broadcast_to(params.emissions.cov, x[1][1:].shape), _condition_on, sharpening=20.0)
+    beta, _ = find_beta(raw_emissions, params, p_d=p_d, g=g, m_t=m_t, steps=cavi_iters)
+    emissions = EmissionCAVI(*raw_emissions, beta=beta, p_d=p_d, g=g, m_t=m_t)
     stats, ll = lgssm.e_step(params, emissions)
     batch_stats, lls = tree_map(partial(jnp.expand_dims, axis=0), (stats, ll)) # add fake batch dimension
     lp = lgssm.log_prior(params) + lls.sum()
