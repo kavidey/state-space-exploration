@@ -97,13 +97,13 @@ def MVN_multiply(m1: Array, c1: Array, m2: Array, c2: Array) -> tuple[float, MVN
     mean_diff = m1 - m2
     cov = c1 + c2
     # c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
-    c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.solve(cov, mean_diff))
+    c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.linalg.slogdet(cov)[1] + mean_diff.T @ jnp.linalg.solve(cov, mean_diff))
 
     s_cov_inv = jnp.linalg.inv(c1)
     o_cov_inv = jnp.linalg.inv(c2)
 
     cov = jnp.linalg.inv(s_cov_inv+o_cov_inv)
-    mean = cov @ (s_cov_inv @ c1.T + o_cov_inv @ c2.T)
+    mean = cov @ (s_cov_inv @ m1 + o_cov_inv @ m2)
 
     return c, (mean, cov)
 
