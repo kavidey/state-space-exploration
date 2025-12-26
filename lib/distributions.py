@@ -68,7 +68,7 @@ jax.tree_util.register_pytree_node(MultivariateNormalFullCovariance,
                                MultivariateNormalFullCovariance._tree_flatten,
                                MultivariateNormalFullCovariance._tree_unflatten)
 
-def MVN_multiply(m1: Array, c1: Array, m2: Array, c2: Array) -> tuple[float, MVN_Type]:
+def MVN_multiply(m1: Array, c1: Array, m2: Array, c2: Array) -> Tuple[float, Tuple[Array, Array]]:
     '''
     Calculates the product of gaussian densities
 
@@ -97,17 +97,17 @@ def MVN_multiply(m1: Array, c1: Array, m2: Array, c2: Array) -> tuple[float, MVN
     mean_diff = m1 - m2
     cov = c1 + c2
     # c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
-    c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.linalg.slogdet(cov)[1] + mean_diff.T @ jnp.linalg.solve(cov, mean_diff))
+    c = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.linalg.slogdet(cov)[1] + mean_diff.T @ jax.scipy.linalg.cho_solve((cov, True), mean_diff))
 
-    s_cov_inv = jnp.linalg.inv(c1)
-    o_cov_inv = jnp.linalg.inv(c2)
+    s_cov_inv = jax.scipy.linalg.cho_solve((c1, True), jnp.eye(k))
+    o_cov_inv = jax.scipy.linalg.cho_solve((c2, True), jnp.eye(k))
 
     cov = jnp.linalg.inv(s_cov_inv+o_cov_inv)
     mean = cov @ (s_cov_inv @ m1 + o_cov_inv @ m2)
 
     return c, (mean, cov)
 
-def MVN_inverse_bayes(prior: MVN_Type, posterior: MVN_Type):
+def MVN_inverse_bayes(prior: Tuple[Array, Array], posterior: Tuple[Array, Array]):
     '''
     Determines the gaussian likelihood function given a gaussian posterior and prior
 
@@ -125,13 +125,20 @@ def MVN_inverse_bayes(prior: MVN_Type, posterior: MVN_Type):
     tuple[Array, Array]
         gaussian likelihood function
     '''
+    k = prior[0].shape[-1]
+
     # if \Sigma_posterior^-1 - \Sigma_prior^-1 is not positive semidefinite then this is an invalid covariance matrix
     issue = jnp.any(jnp.isnan(jnp.linalg.cholesky(jnp.linalg.inv(posterior[1]) - jnp.linalg.inv(prior[1]))))
 
     # \Sigma_l = (\Sigma_posterior^-1 - \Sigma_prior^-1)^-1
-    likelihood_sigma = jnp.linalg.inv(jnp.linalg.inv(posterior[1]) - jnp.linalg.inv(prior[1]))
+    # likelihood_sigma = jnp.linalg.inv(jnp.linalg.inv(posterior[1]) - jnp.linalg.inv(prior[1]))
+    likelihood_sigma = jax.scipy.linalg.cho_solve(
+        (jax.scipy.linalg.cho_solve((posterior[1], True), jnp.eye(k)) - jax.scipy.linalg.cho_solve((prior[1], True), jnp.eye(k)), True),
+    jnp.eye(k))
+
     # \mu_l = \Sigma_l @ (\Sigma_posterior^-1 @ \mu_posterior - \Sigma_prior^-1 @ \mu_prior)
-    likelihood_mu = likelihood_sigma @ (jnp.linalg.inv(posterior[1]) @ posterior[0] - jnp.linalg.inv(prior[1]) @ prior[0])
+    # likelihood_mu = likelihood_sigma @ (jnp.linalg.inv(posterior[1]) @ posterior[0] - jnp.linalg.inv(prior[1]) @ prior[0])
+    likelihood_mu = likelihood_sigma @ (jax.scipy.linalg.cho_solve((posterior[1], True), posterior[0]) - jax.scipy.linalg.cho_solve((prior[1], True), prior[0]))
     
     return (likelihood_mu, likelihood_sigma)
 
@@ -156,7 +163,7 @@ def MVN_log_likelihood(mean: Array, cov: Array, x: Array) -> float:
     k = mean.shape[-1]
     mean_diff = mean - x
     # log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.inv(cov) @ mean_diff)
-    log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.log(jnp.linalg.det(cov)) + mean_diff.T @ jnp.linalg.solve(cov, mean_diff))
+    log_likelihood = -(1/2) * (k * jnp.log(2*jnp.pi) + jnp.linalg.slogdet(cov)[1] + mean_diff.T @ jax.scipy.linalg.cho_solve((cov, True), mean_diff))
     return log_likelihood
 
 def MVN_kl_divergence(mu_0: Array, sigma_0: Array, mu_1: Array, sigma_1: Array) -> float:
@@ -164,10 +171,10 @@ def MVN_kl_divergence(mu_0: Array, sigma_0: Array, mu_1: Array, sigma_1: Array) 
 
     # \frac{1}{2} (\text{tr}(\Sigma_1^{-1}\Sigma_0) + (\mu_1 - \mu_0)^T \Sigma_1^{-1} (\mu_1-\mu_0)-k+\log(\frac{\det \Sigma_1}{\det \Sigma_0}))
     # a = jnp.trace(jnp.linalg.inv(sigma_1) @ sigma_0)
-    a = jnp.trace(jnp.linalg.solve(sigma_1, sigma_0))
+    a = jnp.trace(jax.scipy.linalg.cho_solve((sigma_1, True), sigma_0))
     mean_diff = mu_1 - mu_0
     # b = mean_diff.T @ jnp.linalg.inv(sigma_1) @ mean_diff
-    b = mean_diff.T @ jnp.linalg.solve(sigma_1, mean_diff)
+    b = mean_diff.T @ jax.scipy.linalg.cho_solve((sigma_1, True), mean_diff)
     c = jnp.log(jnp.linalg.det(sigma_1) / jnp.linalg.det(sigma_0))
     return 0.5 * (a + b - k + c)
 
